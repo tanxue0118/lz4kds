@@ -1,0 +1,47 @@
+# ── 编译工作区（体积大，可重建）──
+work/
+dist/
+*.log
+
+# ── 设备取证数据（含厂商 KO 与设备指纹，不入库）──
+devices/*
+!devices/TEMPLATE/
+devices/TEMPLATE/*.ko
+
+# ── 编译产物 ──
+*.ko
+*.o
+*.mod
+*.mod.c
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+
+# ── 工具链（约 2GB）──
+clang/
+clang-*/
+work/clang.env
+
+# ── 参考仓库克隆（用 .gitmodules 或文档链接代替）──
+repos/
+
+# ── 系统与编辑器 ──
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# ── 临时文件 ──
+*.bak
+*.tmp
+*.old
+__pycache__/
+*.pyc
+_shim/
+_shim*/
+_t_*/
+_wt/
+_publish/

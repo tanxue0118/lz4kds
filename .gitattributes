@@ -1,0 +1,19 @@
+# 统一换行符：避免 Windows 检出时把脚本转成 CRLF 导致 shebang 失效
+* text=auto eol=lf
+
+# Shell / Python 必须 LF
+*.sh    text eol=lf
+*.py    text eol=lf
+*.conf  text eol=lf
+*.prop  text eol=lf
+
+# Markdown 用 LF
+*.md    text eol=lf
+
+# 二进制与内核对象不做换行转换（关键：不能对 KO 做文本处理）
+*.ko    binary
+*.o     binary
+*.zip   binary
+*.png   binary
+*.gz    binary
+*.tgz   binary
