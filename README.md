@@ -78,10 +78,12 @@ lz4kds/
 ├── README.md                  ← 本文件
 ├── AGENTS.md                  ← ★ 给 AI 的自动化操作手册
 ├── pipeline.sh                ← ★ 一键流水线（9 阶段，双架构）
+├── .github/workflows/         ← GitHub Actions 云构建
 ├── docs/                      ← ★ 专题文档（见 docs/INDEX.md）
 │   ├── INDEX.md               文档总索引
 │   ├── sddc-source.md         SDDC 源码档案（来源/哈希/职责/阅读顺序）
-│   └── port-5.10.md           5.10 移植任务表（14 项 API / 31 处调用）
+│   ├── port-5.10.md           5.10 移植任务表（14 项 API / 31 处调用）
+│   └── oplus-advanced.md      OPPO 系进阶手法参考（early.rc/bind mount）
 ├── source-oplus/              ← OPPO hybridswap 骨架源码（oplus 路线，来自 jkHXQ）
 ├── source-xiaomi/             ← Crystal HybridSwap 完整驱动源码（xiaomi 路线，来自 2108282/houji）
 ├── templates/
@@ -123,6 +125,52 @@ export ANDROID_CLANG=/path/to/clang-r*/bin
 ```
 
 **默认不自动下载**：找不到工具链时阶段 4 立即失败并列出选项，不会挂住等 2GB。
+
+## 三·六、GitHub Actions 云构建（不用本地装 Linux）
+
+仓库自带 `.github/workflows/build.yml`，在网页上点几下就能编译，产物在 Actions 里下载。
+
+### 触发方式
+
+仓库页面 → **Actions** → **Build lz4kds KO** → **Run workflow**
+
+两种模式：
+
+| 模式 | 需要填 | 说明 |
+|---|---|---|
+| **device** | `device` = `devices/` 下的目录名 | 用真实设备取证包，**产出可刷的包**（过符号闸门 + CRC 对齐）|
+| **manual** | `arch` + `kernel_repo` + `kernel_release` | 只验证"能不能编过"，**产出 EXPERIMENTAL 包**（无 kallsyms，不做符号验证）|
+
+### manual 模式示例
+
+| 参数 | 示例值 |
+|---|---|
+| `arch` | `xiaomi` |
+| `kernel_repo` | `https://github.com/OneplusOSS/android_kernel_oneplus_sm8750` |
+| `kernel_branch` | `oneplus/sm8750_b_16.0.0_oneplus_13` |
+| `kernel_release` | `6.6.118-android15-8-o-4k` |
+| `clang_ver` | `clang-r536225`（默认）|
+
+### 产物
+
+| Artifact | 内容 | 保留 |
+|---|---|---|
+| `lz4kds-module` | `dist/*.zip` 模块包 | 30 天 |
+| `build-debug` | `RESULT.md` / `built-*.ko` / `build.log` | 7 天 |
+
+### 为什么 manual 模式产物标 EXPERIMENTAL
+
+没有设备 `kallsyms.txt`，无法验证 KO 引用的符号在目标内核里都存在。
+编过 ≠ 能加载。所以产物自动改名 `-EXPERIMENTAL.zip` 并写入警告。
+**要产出可信的包，必须提交真实设备取证数据。**
+
+### 已知限制
+
+- `devices/` 默认不入库（含厂商 KO 与设备指纹），所以 device 模式要求你**自行提交**设备目录
+- 单次运行上限 90 分钟；内核树 clone 和 clang 下载占大头（clang 有缓存，第二次快）
+- 首次跑 clang 下载可能 5-15 分钟，之后命中 `actions/cache`
+
+---
 
 ## 四、最快用法
 

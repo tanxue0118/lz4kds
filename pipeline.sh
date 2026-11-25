@@ -229,9 +229,20 @@ else
 fi
 
 # 1.3 必要文件
-for f in uname.txt config.txt kallsyms.txt; do
+for f in uname.txt config.txt; do
   [ -s "$DEVDIR/$f" ] || die "缺少 $DEVDIR/$f"
 done
+
+# kallsyms 缺失时降级为"仅验证能否编过"模式（CI manual 构建用）
+SKIP_SYMGATE=0
+if [ -s "$DEVDIR/kallsyms.txt" ] && [ "$(grep -c . "$DEVDIR/kallsyms.txt" 2>/dev/null)" -gt 100 ]; then
+  log "kallsyms: $(grep -c . "$DEVDIR/kallsyms.txt") 行，符号闸门将启用"
+else
+  SKIP_SYMGATE=1
+  log "WARN: kallsyms.txt 缺失或过小 → 降级为「仅验证可编译」模式"
+  log "      KO 是否能在真机加载无法验证，产物仅供技术验证，请勿直接刷入"
+fi
+
 KREL=$(tr -d '[:space:]' < "$DEVDIR/uname.txt")
 [ -n "$KREL" ] || die "uname.txt 为空"
 log "kernel_release = $KREL"
@@ -388,10 +399,16 @@ log "KO 生成: $KO ($(du -h "$KO" | cut -f1))"
 
 # ============================================================================
 stage "6-闸门1符号"
-if bash "$ROOT/tools/symgate.sh" "$KO" "$DEVDIR/kallsyms.txt" 2>&1 | tee -a "$LOG"; then
-  log "符号闸门 PASS"
+if [ "$SKIP_SYMGATE" = "1" ]; then
+  log "符号闸门 SKIP（无 kallsyms，仅验证编译）"
+  log "      产物标记为 experimental，不建议直接刷入真机"
+  EXPERIMENTAL=1
 else
-  die "符号闸门 FAIL —— KO 引用了设备内核不存在的符号，换树/补 CONFIG"
+  if bash "$ROOT/tools/symgate.sh" "$KO" "$DEVDIR/kallsyms.txt" 2>&1 | tee -a "$LOG"; then
+    log "符号闸门 PASS"
+  else
+    die "符号闸门 FAIL —— KO 引用了设备内核不存在的符号，换树/补 CONFIG"
+  fi
 fi
 
 # ============================================================================
@@ -423,8 +440,27 @@ ARCH="$ARCH" ALGO="$PACK_ALGO" FRESH_DIR="$BUILD_DIR" DEVICE_DIR="$DEVDIR" \
 
 ZIP=$(ls -t "$DIST"/lz4kds侧载-"$ARCH"-*.zip 2>/dev/null | head -1)
 [ -f "$ZIP" ] || die "repack 后未找到 zip"
+
+# experimental 模式：重命名产物并写警告，避免被误刷
+if [ "${EXPERIMENTAL:-0}" = "1" ]; then
+  NEWZIP="${ZIP%.zip}-EXPERIMENTAL.zip"
+  mv -f "$ZIP" "$NEWZIP" && ZIP="$NEWZIP"
+  {
+    echo "=============================================================="
+    echo "⚠ 此包为 EXPERIMENTAL（未经符号闸门验证）"
+    echo "  构建时没有设备的 kallsyms，无法确认 KO 能在真机加载。"
+    echo "  仅供技术验证，请勿直接刷入日常使用设备。"
+    echo "=============================================================="
+  } | tee -a "$LOG"
+fi
+
 ARTIFACT="$ZIP"
-STATUS="SUCCESS"; REASON="架构=$ARCH，9 阶段全部通过"
+STATUS="SUCCESS"
+if [ "${EXPERIMENTAL:-0}" = "1" ]; then
+  REASON="架构=$ARCH，编译通过（无 kallsyms，未做符号验证）"
+else
+  REASON="架构=$ARCH，9 阶段全部通过"
+fi
 write_result
 log "=============================================================="
 log "SUCCESS: $ZIP"
