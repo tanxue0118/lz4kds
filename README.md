@@ -3,7 +3,7 @@
 > **模块名：LZ4KDS侧载　模块 id：`lz4kds_sidecar`　作者：一只做梦的猫**
 >
 > 唯一目标：把 **lz4kds（LZ4KD + SDDC）** 算法侧载进设备运行内存，不写任何分区。
-> 不做容量配置、不做算法切换 UI、不带 WebUI —— 容量与算法请在系统侧调整。
+
 
 **文档导航**：[docs/INDEX.md](docs/INDEX.md) ｜
 [SDDC 源码档案](docs/sddc-source.md) ｜
