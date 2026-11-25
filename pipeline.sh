@@ -372,29 +372,46 @@ esac
 log "架构=$ARCH 源码=$SRCDIR 路径=$MP KO=$KONAME"
 [ -d "$ROOT/$SRCDIR" ] || die "源码目录不存在: $SRCDIR"
 
-# 5.2 放源码
-mkdir -p "$KT/$MP"
-rm -rf "${KT:?}/$MP"/*
-cp -r "$ROOT/$SRCDIR/." "$KT/$MP/"
-cp "$SYMV" "$KT/Module.symvers"
+# ── 5.2 放源码：两种模式 ──
+# oplus  : 树内编译（源码必须放到厂商树的 vendor/oplus/kernel/mm/hybridswap_zram）
+# xiaomi : 树外编译（make M=<源码目录>，不污染内核树的 drivers/block/zram）
+if [ "$ARCH" = "xiaomi" ]; then
+  # 树外编译：源码留原处，只把 Module.symvers 交给内核树
+  MP_ABS="$ROOT/$SRCDIR"
+  cp "$SYMV" "$KT/Module.symvers"
+  log "树外编译模式：M=$MP_ABS（不覆盖内核树 drivers/block/zram）"
+else
+  mkdir -p "$KT/$MP"
+  rm -rf "${KT:?}/$MP"/*
+  cp -r "$ROOT/$SRCDIR/." "$KT/$MP/"
+  cp "$SYMV" "$KT/Module.symvers"
+  MP_ABS="$KT/$MP"
+  log "树内编译模式：源码已放入 $MP"
+fi
 
-# 5.3 CONFIG 开关注入（out-of-tree M= 构建时 CONFIG_*=n 会导致 obj-n 空编译）
-for pin in $CFG_PINS; do
-  key=${pin%%=*}
-  sed -i "/^${key}=/d" "$KT/.config" 2>/dev/null
-  echo "$pin" >> "$KT/.config"
-done
-( cd "$KT" && make $MAKEARGS olddefconfig ) >>"$LOG" 2>&1 \
-  || log "WARN: 注入 CONFIG 后 olddefconfig 失败，继续尝试构建"
-log "CONFIG 注入: $CFG_PINS"
+# ── 5.3 CONFIG 注入 ──
+# xiaomi 路线靠 Makefile 里的 ccflags 直接定义，不需要改 .config
+# oplus 路线仍需要 CONFIG_* 开关（树内 obj-$(CONFIG_xxx) 求值）
+if [ "$ARCH" = "oplus" ]; then
+  for pin in $CFG_PINS; do
+    key=${pin%%=*}
+    sed -i "/^${key}=/d" "$KT/.config" 2>/dev/null
+    echo "$pin" >> "$KT/.config"
+  done
+  ( cd "$KT" && make $MAKEARGS olddefconfig ) >>"$LOG" 2>&1 \
+    || log "WARN: 注入 CONFIG 后 olddefconfig 失败，继续尝试构建"
+  log "CONFIG 注入: $CFG_PINS"
+else
+  log "CONFIG 由 Makefile ccflags 注入（SDDC + LZ4KD 默认启用），不改 .config"
+fi
 
-log "make M=$MP modules ..."
-( cd "$KT" && make $MAKEARGS $EXTRA M="$MP" KBUILD_MODPOST_WARN=1 modules ) >>"$LOG" 2>&1 \
+log "make M=$MP_ABS modules ..."
+( cd "$KT" && make $MAKEARGS $EXTRA M="$MP_ABS" KBUILD_MODPOST_WARN=1 modules ) >>"$LOG" 2>&1 \
   || die "modules 编译失败 —— 查日志末尾 undefined/头文件错误"
 
-KO="$KT/$MP/$KONAME"
-[ -f "$KO" ] || { ls "$KT/$MP"/*.ko >>"$LOG" 2>&1; die "编译结束但未找到 $KONAME（实际产物见日志）"; }
-BUILD_DIR="$KT/$MP"
+KO="$MP_ABS/$KONAME"
+[ -f "$KO" ] || { ls "$MP_ABS"/*.ko >>"$LOG" 2>&1; die "编译结束但未找到 $KONAME（实际产物见日志）"; }
+BUILD_DIR="$MP_ABS"
 log "KO 生成: $KO ($(du -h "$KO" | cut -f1))"
 
 # ============================================================================

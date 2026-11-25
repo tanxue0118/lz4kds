@@ -12,6 +12,7 @@
 | 让 AI 自动跑编译流程 | [../AGENTS.md](../AGENTS.md) |
 | 把取证脚本发给用户 | [../tools/给用户的取证说明.md](../tools/给用户的取证说明.md) |
 | 了解 SDDC 源码从哪来 | [sddc-source.md](sddc-source.md) |
+| **走 Crystal 路线编 zram.ko** | [crystal-route.md](crystal-route.md) |
 | 把 SDDC 移植到 5.10 内核 | [port-5.10.md](port-5.10.md) |
 | 看 OPPO 系进阶手法（early.rc/bind mount）| [oplus-advanced.md](oplus-advanced.md) |
 
@@ -29,6 +30,7 @@
 | 文档 | 内容 |
 |---|---|
 | [sddc-source.md](sddc-source.md) | **SDDC 源码档案**：来源链（华为→Crystal→下游变体）、两个变体对比、文件哈希、职责分工、DESIGN.md 章节导航、可调参数、许可证归属、上游获取方式、阅读顺序、已知降级 |
+| [crystal-route.md](crystal-route.md) | **Crystal 路线完整方案**：原理（自建 zram）、架构分层、SDDC 为何不能独立成 KO、out-of-tree 编译改造、支持内核矩阵（6.1/6.4/6.5/6.6/6.12）、需要准备什么、开源情况实测、已知问题（LZ4KDS 读回 bug）、后续改造方向 |
 | [oplus-advanced.md](oplus-advanced.md) | **OPPO 系进阶手法参考**：分析真实在用的 op13_zram_extend 模块，提取 early.rc 抢载、bind mount 覆盖原厂 KO、SELinux chcon、ksud 自动停用等 8 项手法，并标注哪些适合「只侧载」定位 |
 | [port-5.10.md](port-5.10.md) | **5.10 移植任务表**：14 项缺失 API（31 处调用）、5.10 原厂 zram 参照写法（带行号）、未覆盖风险清单、建议移植顺序、验证方法、替代方案 |
 
