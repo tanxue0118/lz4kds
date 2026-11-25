@@ -1,263 +1,137 @@
-name: Build lz4kds KO
+name: Build AOSP ACK zram.ko
 
 on:
   workflow_dispatch:
     inputs:
-      device:
-        description: '设备目录名（devices/ 下的目录名，留空则用 manual 模式）'
-        required: false
-        type: string
-      arch:
-        description: '架构路线（manual 模式必填）'
-        required: false
+      manifest_branch:
+        description: 'AOSP ACK manifest 分支（ARM64 / 4 KiB）'
         type: choice
-        options: ['', 'oplus', 'xiaomi']
-      kernel_repo:
-        description: '内核源码仓库（manual 模式必填）'
-        required: false
-        type: string
-      kernel_branch:
-        description: '内核分支'
-        required: false
-        type: string
-      kernel_release:
-        description: '目标内核版本串（uname -r 全串，写入 vermagic）'
-        required: false
-        type: string
-      clang_ver:
-        description: 'Android clang 版本'
-        required: false
-        default: 'clang-r536225'
-        type: string
+        default: common-android15-6.6
+        options:
+          - common-android14-6.1
+          - common-android15-6.6
+          - common-android16-6.12
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'patches/ack/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}-${{ inputs.device || 'manual' }}
-  cancel-in-progress: false
+  group: ack-zram-${{ github.ref }}-${{ inputs.manifest_branch || 'common-android15-6.6' }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build KO
-    runs-on: ubuntu-22.04
-    timeout-minutes: 90
-
+    name: Build ARM64 ACK zram
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      ACK_BRANCH: ${{ inputs.manifest_branch || 'common-android15-6.6' }}
     steps:
-      - name: Checkout
+      - name: Checkout project
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: 校验输入
-        id: check
+      - name: Install Repo and host dependencies
         shell: bash
         run: |
-          set -euo pipefail
-          DEV='${{ inputs.device }}'
-          ARCH='${{ inputs.arch }}'
-          REPO='${{ inputs.kernel_repo }}'
-          BRANCH='${{ inputs.kernel_branch }}'
-          KREL='${{ inputs.kernel_release }}'
-
-          if [ -n "$DEV" ]; then
-            if [ ! -d "devices/$DEV" ]; then
-              echo "::error::devices/$DEV 不存在。仓库里的 devices/ 只有 TEMPLATE，真实设备数据需自行提交。"
-              echo "mode=none" >> "$GITHUB_OUTPUT"
-              exit 1
-            fi
-            echo "mode=device" >> "$GITHUB_OUTPUT"
-            echo "device=$DEV" >> "$GITHUB_OUTPUT"
-            echo "::notice::使用设备配置 devices/$DEV"
-          else
-            if [ -z "$ARCH" ] || [ -z "$REPO" ] || [ -z "$KREL" ]; then
-              echo "::error::manual 模式必须提供 arch / kernel_repo / kernel_release"
-              exit 1
-            fi
-            echo "mode=manual" >> "$GITHUB_OUTPUT"
-            echo "::notice::manual 模式：arch=$ARCH repo=$REPO"
-          fi
-
-      - name: 安装构建依赖
-        shell: bash
-        run: |
-          set -euo pipefail
+          ACK_ROOT="$RUNNER_TEMP/ack"
+          BUILD_INFO="$RUNNER_TEMP/ack-build-info"
+          DIST="$RUNNER_TEMP/ack-dist"
+          ARTIFACT="$RUNNER_TEMP/ack-zram-artifact"
+          {
+            printf 'ACK_ROOT=%s\n' "$ACK_ROOT"
+            printf 'BUILD_INFO=%s\n' "$BUILD_INFO"
+            printf 'DIST=%s\n' "$DIST"
+            printf 'ARTIFACT=%s\n' "$ARTIFACT"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/bin" "$ACK_ROOT" "$BUILD_INFO" "$DIST" "$ARTIFACT"
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            git make python3 gcc g++ bc bison flex libssl-dev \
-            kmod zip unzip xz-utils libelf-dev cpio rsync
-          echo "--- 版本 ---"
-          for t in git make python3 gcc; do
-            printf '%-8s %s\n' "$t" "$($t --version 2>&1 | head -1)"
-          done
+          sudo apt-get install -y -qq bc bison flex libc6-dev libelf-dev libssl-dev
+          curl --fail --show-error --silent --location --retry 3 \
+            --output "$RUNNER_TEMP/bin/repo" https://storage.googleapis.com/git-repo-downloads/repo
+          chmod +x "$RUNNER_TEMP/bin/repo"
+          printf '%s\n' "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          df -h "$ACK_ROOT"
 
-      - name: 获取 Android clang
-        id: clang
+      - name: Sync AOSP kernel and its toolchain
+        shell: bash
+        working-directory: ${{ env.ACK_ROOT }}
+        run: |
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b "$ACK_BRANCH" --depth=1 --no-tags
+          repo sync -c --no-tags --fail-fast -j4
+          repo manifest -r -o "$BUILD_INFO/manifest.xml"
+          git -C common rev-parse HEAD > "$BUILD_INFO/ack-commit.txt"
+          df -h .
+
+      - name: Apply optional ACK patches
+        id: patches
+        shell: bash
+        run: |
+          export LC_ALL=C
+          shopt -s nullglob
+          patches=("$GITHUB_WORKSPACE/patches/ack/$ACK_BRANCH/"*.patch)
+          variant=baseline
+          : > "$BUILD_INFO/patches.sha256"
+          if (( ${#patches[@]} )); then
+            variant=patched
+            for patch in "${patches[@]}"; do
+              printf 'Applying %s\n' "${patch##*/}"
+              git -C "$ACK_ROOT/common" apply --index "$patch"
+              (cd "$(dirname "$patch")" && sha256sum "${patch##*/}") >> "$BUILD_INFO/patches.sha256"
+            done
+            git -C "$ACK_ROOT/common" diff --cached --check
+          fi
+          printf 'variant=%s\n' "$variant" >> "$GITHUB_OUTPUT"
+          printf 'manifest_branch=%s\nvariant=%s\nproject_commit=%s\n' \
+            "$ACK_BRANCH" "$variant" "$GITHUB_SHA" > "$BUILD_INFO/build.txt"
+
+      - name: Build ARM64 GKI with Kleaf
+        shell: bash
+        working-directory: ${{ env.ACK_ROOT }}
+        run: |
+          tools/bazel run //common:kernel_aarch64_dist -- --destdir="$DIST" \
+            2>&1 | tee "$BUILD_INFO/build.log"
+
+      - name: Collect zram.ko and build metadata
         shell: bash
         env:
-          CLANG_VER: ${{ inputs.clang_ver }}
+          VARIANT: ${{ steps.patches.outputs.variant }}
         run: |
-          set -euo pipefail
-          CACHE_DIR="$RUNNER_TOOL_CACHE/android-clang"
-          mkdir -p "$CACHE_DIR"
-
-          # 复用已缓存的工具链
-          if [ -x "$CACHE_DIR/$CLANG_VER/bin/clang" ]; then
-            echo "命中缓存: $CACHE_DIR/$CLANG_VER/bin"
-            echo "bin=$CACHE_DIR/$CLANG_VER/bin" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "下载 $CLANG_VER（gitiles 归档，约 400-600MB）..."
-          URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/$CLANG_VER.tar.gz"
-          TMP="$CACHE_DIR/clang.tar.gz"
-          mkdir -p "$CACHE_DIR/$CLANG_VER"
-
-          if curl -fL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 1500 \
-                -o "$TMP" "$URL"; then
-            tar xzf "$TMP" -C "$CACHE_DIR/$CLANG_VER"
-            rm -f "$TMP"
-          else
-            echo "::warning::归档下载失败，回退 git 浅克隆（约 2GB）"
-            rm -rf "$CACHE_DIR/repo"
-            git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 "$CACHE_DIR/repo"
-            FOUND=$(ls -d "$CACHE_DIR/repo"/clang-r*/bin 2>/dev/null | head -1)
-            if [ -z "$FOUND" ]; then
-              echo "::error::未找到 clang-r*/bin"
-              exit 1
-            fi
-            echo "bin=$FOUND" >> "$GITHUB_OUTPUT"
-            echo "CLANG_BIN=$FOUND" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          if [ ! -x "$CACHE_DIR/$CLANG_VER/bin/clang" ]; then
-            echo "::error::$CLANG_VER/bin/clang 不存在，请检查版本号"
-            ls -la "$CACHE_DIR/$CLANG_VER" | head -20
+          find "$DIST" -type f -name zram.ko -print > "$BUILD_INFO/zram-paths.txt"
+          mapfile -t modules < "$BUILD_INFO/zram-paths.txt"
+          if (( ${#modules[@]} != 1 )); then
+            echo "::error::Expected exactly one zram.ko in the Kleaf dist; found ${#modules[@]}"
             exit 1
           fi
-          echo "bin=$CACHE_DIR/$CLANG_VER/bin" >> "$GITHUB_OUTPUT"
+          cp "${modules[0]}" "$ARTIFACT/zram.ko"
+          cp "$BUILD_INFO/"{manifest.xml,ack-commit.txt,patches.sha256,build.txt} "$ARTIFACT/"
+          (cd "$ARTIFACT" && sha256sum zram.ko > zram.ko.sha256)
+          {
+            printf '### ACK zram.ko\n\n- Manifest: `%s`\n- ACK commit: `%s`\n- Variant: `%s`\n' \
+              "$ACK_BRANCH" "$(<"$BUILD_INFO/ack-commit.txt")" "$VARIANT"
+            printf '\n此产物对应本次 ACK 构建，真机兼容性和运行时读回需单独验证。\n'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 缓存 clang（下次加速）
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.tool_cache }}/android-clang
-          key: android-clang-${{ inputs.clang_ver }}-v1
-
-      - name: 准备设备配置（manual 模式）
-        if: steps.check.outputs.mode == 'manual'
-        shell: bash
-        env:
-          ARCH: ${{ inputs.arch }}
-          REPO: ${{ inputs.kernel_repo }}
-          BRANCH: ${{ inputs.kernel_branch }}
-          KREL: ${{ inputs.kernel_release }}
-        run: |
-          set -euo pipefail
-          DEV="manual-$(echo "$KREL" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-40)"
-          mkdir -p "devices/$DEV"
-
-          cat > "devices/$DEV/build.conf" <<EOF
-          [device]
-          model = manual
-          kmi = $(echo "$KREL" | grep -oE 'android[0-9]+-[0-9]+\.[0-9]+' | head -1 || echo unknown)
-          kernel_release = $KREL
-
-          [arch]
-          type = $ARCH
-
-          [kernel]
-          repo = $REPO
-          branch = $BRANCH
-          depth = 1
-
-          [build]
-          source_dir =
-          module_path =
-          ko_name =
-          extra_ko =
-          crc_ref_ko =
-          clang_dir =
-          extra_make_flags =
-
-          [pack]
-          algo = lz4kds
-          EOF
-          # 去掉 heredoc 的公共缩进
-          sed -i 's/^          //' "devices/$DEV/build.conf"
-
-          # pipeline 需要的基础文件（manual 模式无真机取证，走宽松路径）
-          echo "$KREL" > "devices/$DEV/uname.txt"
-          echo "4096" > "devices/$DEV/page_size.txt"
-          echo "CONFIG_ZRAM=m" > "devices/$DEV/config.txt"
-          echo "CONFIG_MODVERSIONS=y" >> "devices/$DEV/config.txt"
-          : > "devices/$DEV/kallsyms.txt"
-
-          echo "DEV=$DEV" >> "$GITHUB_ENV"
-          echo "::notice::生成设备目录 devices/$DEV"
-
-      - name: 同步 tool 执行权限
-        shell: bash
-        run: chmod +x pipeline.sh tools/*.sh
-
-      - name: 运行流水线
-        shell: bash
-        env:
-          ANDROID_CLANG: ${{ steps.clang.outputs.bin }}
-        run: |
-          set -uo pipefail
-          DEV="${DEV:-${{ inputs.device }}}"
-          echo "===== 开始构建: devices/$DEV ====="
-          bash pipeline.sh "devices/$DEV" 2>&1 | tee pipeline.out
-          RC=${PIPESTATUS[0]}
-          echo "pipeline rc=$RC"
-          exit $RC
-
-      - name: 显示构建日志
-        if: always()
-        shell: bash
-        run: |
-          DEV="${DEV:-${{ inputs.device }}}"
-          for f in "devices/$DEV/RESULT.md" "work/$DEV/build.log"; do
-            if [ -f "$f" ]; then
-              echo "========== $f =========="
-              tail -100 "$f"
-            fi
-          done
-
-      - name: 上传模块包
-        if: success()
+      - name: Upload zram.ko
         uses: actions/upload-artifact@v4
         with:
-          name: lz4kds-module
-          path: dist/*.zip
+          name: zram-${{ env.ACK_BRANCH }}-${{ steps.patches.outputs.variant }}
+          path: ${{ env.ARTIFACT }}/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 14
 
-      - name: 上传 KO 与日志（便于排查）
+      - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-debug
-          path: |
-            devices/*/RESULT.md
-            devices/*/built-*.ko
-            work/*/build.log
-            pipeline.out
+          name: ack-build-diagnostics
+          path: ${{ env.BUILD_INFO }}/
           if-no-files-found: ignore
           retention-days: 7
-
-      - name: 失败提示
-        if: failure()
-        shell: bash
-        run: |
-          cat <<'MSG'
-          ::error::构建失败。请查看 build-debug 产物中的 build.log。
-
-          常见原因：
-            — 内核源码树与目标内核不匹配（olddefconfig 报错）
-            — 缺少厂商私有源码（编译 undefined）
-            — manual 模式没有 kallsyms.txt，符号闸门无法验证（会跳过或报错）
-            — clang 版本与内核要求不符
-
-          manual 模式只做"能否编过"的验证；要产出真正可刷的包，
-          需要把真机取证文件（devices/<设备>/）提交到仓库。
-          MSG

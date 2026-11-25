@@ -29,22 +29,11 @@
 
 ---
 
-## 2. 来源链（三层）
+## 2. 代码来源
 
-```
-华为 HiSilicon  LZ4K / LZ4KD 编解码算法
-        │
-        ▼
-Crystal HybridSwap（Wcoom）  SDDC 状态机 + 引用生命周期 + ZMS 回写
-  https://github.com/Wcoom/oneplus_sm8750_kernel
-  drivers/crystalfrostwork/crystal_hybridswap
-        │
-        ├──────────────────────┬──────────────────────┐
-        ▼                      ▼                      ▼
-  jkHXQ（oplus 变体）     2108282（xiaomi 变体）   whitewhale0612
-  接在 OPPO 原厂驱动上     完整替换 zram.ko         内核内建版本
-  RMX5010 6.6.89           houji 6.1 GKI            OnePlus SM8750
-```
+- 华为 HiSilicon 的 LZ4K/LZ4KD codec 提供普通和 delta 编解码。各文件的版权和许可见源码头。
+- Crystal HybridSwap 在 zram 中增加相似流索引、不可变引用和 alias/delta 状态。Wcoom 仓库是 `whitewhale0612` 的 fork，提供一份公开的 Crystal 源码快照。
+- 当前工作区的两份变体分别取自 jkHXQ 的 RMX5010 适配和 2108282 的 houji 移植。设备适配、引用测试和运行结论按对应提交阅读。
 
 ---
 
@@ -157,38 +146,24 @@ source-xiaomi/sddc/
 
 | 组件 | 归属 | 许可证 |
 |---|---|---|
-| SDDC 状态机 / 引用生命周期 | Crystal HybridSwap（Wcoom）| `GPL-2.0-or-later`（源码头 `SPDX-License-Identifier: GPL-2.0-or-later`）|
+| SDDC 状态机 / 引用生命周期 | Crystal HybridSwap（按源码版权与提交记录核对）| `GPL-2.0-or-later`（源码头 `SPDX-License-Identifier: GPL-2.0-or-later`）|
 | LZ4K / LZ4KD 编解码 | 华为 HiSilicon | 随源码声明 |
 | zram 驱动骨架 / hybridswap / ZMS | OPPO / realme（oplus 变体）| Dual BSD/GPL |
 | oplus 适配层（compat/接点/自检）| jkHXQ（codxe）| GPL-2.0 |
 | xiaomi 移植（6.1 适配/熔断/还原）| 2108282 | GPL-2.0 |
 | 本侧载封装（模板/工具链/流水线/文档）| 一只做梦的猫 | GPL-2.0 |
 
-**分发义务**：GPL-2.0 要求随二进制提供对应源码。发布 zip 时须附本工作区 + 所用内核树引用。
+分发编译产物时，保留实际使用的源文件、所应用的补丁及构建所需脚本，按各文件的许可证提供对应源码。
 
 ---
 
-## 8. 如何重新获取上游源码
+## 8. 公开源码参考
 
-```bash
-# 1) Crystal HybridSwap 上游（SDDC 原始出处）
-git clone --depth=1 https://github.com/Wcoom/oneplus_sm8750_kernel
-# 关键目录：drivers/crystalfrostwork/crystal_hybridswap/
+从 [AOSP ACK 基线](build-own-zram.md) 开始构建。下面的链接供阅读和溯源。
 
-# 2) oplus 变体（jkHXQ 适配层）
-git clone --depth=1 https://github.com/jkHXQ/RMX5010-lz4kds-zram
-# 关键目录：src/sddc/、src/crystal_sddc_compat.h、src/zram_drv.c
-
-# 3) xiaomi 变体（含 DESIGN.md 与 KUnit 测试）
-git clone --depth=1 https://github.com/2108282/zram-lz4kds-sddc-houji-6.1
-# 关键目录：drivers/crystal_hybridswap/
-
-# 4) 设备内核源码参考
-git clone --depth=1 https://github.com/whitewhale0612/android_kernel_common_oneplus_sm8750-C16
-```
-
-本工作区已在 `repos/` 下克隆了上述仓库（含 `misaka5202/zram-lkm`、
-`okhsunrog/vpnhide-kmod`、`bol-van/extract-symvers-ng` 三份参考）。
+- [houji 的 SDDC 设计、codec 和 KUnit](https://github.com/2108282/zram-lz4kds-sddc-houji-6.1/tree/9b223f005da12d39167515c37828395f412e31f9/drivers/crystal_hybridswap/sddc)。适合参考 scalar 实现、代际、引用和测试。
+- [Wcoom 的 Crystal 目录](https://github.com/Wcoom/oneplus_sm8750_kernel/tree/13d291aef3d1d9607ad3fa5ff30dc23b2888a3da/drivers/crystalfrostwork/crystal_hybridswap)。该仓库是 `whitewhale0612` 仓库的 fork，具体归属按文件和提交历史确认。
+- [RMX5010 的适配层](https://github.com/jkHXQ/RMX5010-lz4kds-zram)。仅供维护工作区已有的 oplus 变体时对照。
 
 ---
 

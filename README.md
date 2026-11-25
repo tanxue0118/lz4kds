@@ -1,16 +1,10 @@
-# lz4kds 侧载模块 · per-device KO 编译工作区
+# lz4kds 工作区
 
-> **模块名：LZ4KDS侧载　模块 id：`lz4kds_sidecar`　作者：一只做梦的猫**
->
-> 唯一目标：把 **lz4kds（LZ4KD + SDDC）** 算法侧载进设备运行内存，不写任何分区。
+**从 AOSP 自建 zram + SDDC**的入口是 [ACK 自建指南](docs/build-own-zram.md)。按运行内核选择 ACK 分支，用官方 Kleaf 先构建标准 zram，再加入功能并验收读回。
 
+**维护既有设备侧载包**时，继续使用下文的 `oplus` / `xiaomi` 流水线。模块名是 LZ4KDS侧载，id 为 `lz4kds_sidecar`，作者为一只做梦的猫。
 
-**文档导航**：[docs/INDEX.md](docs/INDEX.md) ｜
-[SDDC 源码档案](docs/sddc-source.md) ｜
-[5.10 移植任务表](docs/port-5.10.md) ｜
-[AI 自动化手册](AGENTS.md)
-
----
+[全部文档](docs/INDEX.md) · [SDDC 源码档案](docs/sddc-source.md) · [5.10 移植记录](docs/port-5.10.md) · [侧载自动化手册](AGENTS.md)
 
 ## 一、两条架构路线（关键）
 
@@ -81,6 +75,7 @@ lz4kds/
 ├── .github/workflows/         ← GitHub Actions 云构建
 ├── docs/                      ← ★ 专题文档（见 docs/INDEX.md）
 │   ├── INDEX.md               文档总索引
+│   ├── build-own-zram.md       AOSP ACK 自建指南
 │   ├── sddc-source.md         SDDC 源码档案（来源/哈希/职责/阅读顺序）
 │   ├── port-5.10.md           5.10 移植任务表（14 项 API / 31 处调用）
 │   └── oplus-advanced.md      OPPO 系进阶手法参考（early.rc/bind mount）
@@ -126,51 +121,15 @@ export ANDROID_CLANG=/path/to/clang-r*/bin
 
 **默认不自动下载**：找不到工具链时阶段 4 立即失败并列出选项，不会挂住等 2GB。
 
-## 三·六、GitHub Actions 云构建（不用本地装 Linux）
+## GitHub Actions 构建 ACK zram.ko
 
-仓库自带 `.github/workflows/build.yml`，在网页上点几下就能编译，产物在 Actions 里下载。
+进入 [Build AOSP ACK zram.ko](https://github.com/tanxue0118/lz4kds/actions/workflows/build.yml)，点击 **Run workflow**，选择 ACK manifest 分支。默认 `common-android15-6.6`，可选 `common-android14-6.1` 和 `common-android16-6.12`。工作流或 ACK 补丁推送到主分支时，也会用默认的 6.6 基线自动构建。
 
-### 触发方式
+- `zram-<manifest 分支>-baseline` 提供官方 ACK 构建的标准 `zram.ko`。当前仓库还没有 ACK SDDC 补丁。
+- 对应的 `patches/ack/<manifest 分支>/` 加入 `0001-*.patch`、`0002-*.patch` 等补丁后，Actions 按文件名顺序应用，再上传 `zram-<manifest 分支>-patched`。补丁中的路径以 ACK `common` 仓库根目录为准，例如 `drivers/block/zram/zram_drv.c`。需要将 SDDC 编入产物时，同时提交功能实现和实际构建使用的配置。
+- KO 随附固定到本次提交的 manifest、ACK 提交、补丁 SHA-256 和产物 SHA-256。`ack-build-diagnostics` 保存构建信息与日志。
 
-仓库页面 → **Actions** → **Build lz4kds KO** → **Run workflow**
-
-两种模式：
-
-| 模式 | 需要填 | 说明 |
-|---|---|---|
-| **device** | `device` = `devices/` 下的目录名 | 用真实设备取证包，**产出可刷的包**（过符号闸门 + CRC 对齐）|
-| **manual** | `arch` + `kernel_repo` + `kernel_release` | 只验证"能不能编过"，**产出 EXPERIMENTAL 包**（无 kallsyms，不做符号验证）|
-
-### manual 模式示例
-
-| 参数 | 示例值 |
-|---|---|
-| `arch` | `xiaomi` |
-| `kernel_repo` | `https://github.com/OneplusOSS/android_kernel_oneplus_sm8750` |
-| `kernel_branch` | `oneplus/sm8750_b_16.0.0_oneplus_13` |
-| `kernel_release` | `6.6.118-android15-8-o-4k` |
-| `clang_ver` | `clang-r536225`（默认）|
-
-### 产物
-
-| Artifact | 内容 | 保留 |
-|---|---|---|
-| `lz4kds-module` | `dist/*.zip` 模块包 | 30 天 |
-| `build-debug` | `RESULT.md` / `built-*.ko` / `build.log` | 7 天 |
-
-### 为什么 manual 模式产物标 EXPERIMENTAL
-
-没有设备 `kallsyms.txt`，无法验证 KO 引用的符号在目标内核里都存在。
-编过 ≠ 能加载。所以产物自动改名 `-EXPERIMENTAL.zip` 并写入警告。
-**要产出可信的包，必须提交真实设备取证数据。**
-
-### 已知限制
-
-- `devices/` 默认不入库（含厂商 KO 与设备指纹），所以 device 模式要求你**自行提交**设备目录
-- 单次运行上限 90 分钟；内核树 clone 和 clang 下载占大头（clang 有缓存，第二次快）
-- 首次跑 clang 下载可能 5-15 分钟，之后命中 `actions/cache`
-
----
+产物用于当前 ACK 构建的开发验证。目标设备模块加载、数据读回和侧载打包见 [ACK 自建指南](docs/build-own-zram.md)。既有设备侧载流程仍使用本地流水线和设备取证目录。
 
 ## 四、最快用法
 
@@ -224,9 +183,8 @@ bash pipeline.sh devices/RMX5010-6.6.89-android15-8
 | **[jkHXQ/RMX5010-lz4kds-zram](https://github.com/jkHXQ/RMX5010-lz4kds-zram)** | **主源码来源**（oplus 路线）。RMX5010 上给 `oplus_bsp_hybridswap_zram` 接 LZ4KD+SDDC 的适配源码与模块结构 |
 | **[2108282/zram-lz4kds-sddc-houji-6.1](https://github.com/2108282/zram-lz4kds-sddc-houji-6.1)** | **xiaomi 路线参考** + CRC 补丁脚本。小米14 的 crystal_hybridswap 完整驱动移植，含 boot_id 熔断、原厂还原、崩溃归因 |
 | **[misaka5202/zram-lkm](https://github.com/misaka5202/zram-lkm)** | 通用 crypto 算法 LKM。把 lz4k/lz4kd 做成跨 KMI 可加载模块（7 个 KMI）|
-| **[okhsunrog/vpnhide-kmod](https://github.com/okhsunrog/vpnhide-kmod)** | 通用 GKI KO 构建流程范本（任意 GKI 设备出 KO 的标准步骤）|
 | **[bol-van/extract-symvers-ng](https://github.com/bol-van/extract-symvers-ng)** | 备用 CRC 来源：从二进制 vmlinux 直接抽 Module.symvers |
-| **[Wcoom/oneplus_sm8750_kernel](https://github.com/Wcoom/oneplus_sm8750_kernel)** | Crystal HybridSwap 上游（`drivers/crystalfrostwork/crystal_hybridswap`）|
+| **[Wcoom/oneplus_sm8750_kernel](https://github.com/Wcoom/oneplus_sm8750_kernel)** | Crystal HybridSwap 公开源码快照（`whitewhale0612` 仓库的 fork）|
 
 ### 上游归属（发布时保留）
 
@@ -234,7 +192,7 @@ bash pipeline.sh devices/RMX5010-6.6.89-android15-8
 |---|---|---|
 | zram 驱动骨架、hybridswap core/swapd、回写、memcg 策略 | OPPO / realme 原厂 | Dual BSD/GPL |
 | LZ4KD / LZ4K 编解码 | 华为 HiSilicon | 随源码声明 |
-| SDDC 相似页索引、alias/delta、生命周期状态机 | Crystal HybridSwap（Wcoom）| GPL-2.0-or-later |
+| SDDC 相似页索引、alias/delta、生命周期状态机 | Crystal HybridSwap（按源码版权与提交记录核对）| GPL-2.0-or-later |
 | lz4kd/lz4kds 后端、zram 接点、兼容层、自检 | jkHXQ 适配层 | GPL-2.0 |
 | xiaomi 路线移植（熔断/还原/归因） | 2108282 | GPL-2.0 |
 | 本侧载模块封装（双架构模板、工具链、流水线） | 一只做梦的猫 | GPL-2.0 |
@@ -352,7 +310,7 @@ mkswap /dev/block/zram0 && swapon /dev/block/zram0
 
 已知实测：
 - ✅ realme GT7 Pro (RMX5010, 6.6.89-android15-8) — oplus 路线，压缩比约 5.0x
-- ✅ 小米14 (houji, 6.1 GKI) — xiaomi 路线，Actions 云编译
+- ✅ 小米14 (houji, 6.1 GKI) — 既有 xiaomi 侧载路线
 - ✅ 一加 SM8750 全家 — whitewhale0612 内核内建 lz4kds
 
 ## 十、合规

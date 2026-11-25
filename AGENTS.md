@@ -56,6 +56,8 @@ ALLOW_CLANG_DOWNLOAD=1 bash pipeline.sh devices/<设备>
 
 ## 1. 目录语义
 
+新建 AOSP zram 时按 [ACK 自建指南](docs/build-own-zram.md) 使用官方 manifest 和 Kleaf。本手册描述现有设备的侧载流水线。工作区若有 `archive/` 和 `_publish/`，前者是本地历史归档，后者是独立发布工作树。
+
 ```
 lz4kds/
 ├── AGENTS.md              ← 本文档（AI 入口，先读）
@@ -72,7 +74,7 @@ lz4kds/
 │   └── xiaomi/            ← 路线B：zram.ko 替换（含熔断与还原）
 ├── devices/               ← ★ 每设备一个文件夹
 │   └── TEMPLATE/          空白模板（build.conf）
-├── work/                  ← 编译工作区（可删重建）
+├── work/                  ← 构建缓存、日志及本地内核树
 ├── dist/                  ← 产物 zip
 └── tools/                 ← recon.sh / extract_crcs.py / crc_align.py / symgate.sh / repack.sh
 ```

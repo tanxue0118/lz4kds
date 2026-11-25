@@ -12,12 +12,9 @@
 | 让 AI 自动跑编译流程 | [../AGENTS.md](../AGENTS.md) |
 | 把取证脚本发给用户 | [../tools/给用户的取证说明.md](../tools/给用户的取证说明.md) |
 | 了解 SDDC 源码从哪来 | [sddc-source.md](sddc-source.md) |
-| **从零做一个带 SDDC 的 zram** | [build-own-zram.md](build-own-zram.md) |
-| 把 SDDC 编进已有 zram.ko | [build-own-zram.md](build-own-zram.md) | **从零做带 SDDC 的 zram 操作手册**（34 KB，9 章 + 3 附录）：三条源码获取途径对比、内核树获取与前置检查、zram 驱动骨架详解（模块入口在 core.c、block_device_operations、核心数据结构、sysfs 接口）、路线 A 基于 Crystal 改、路线 B 从标准 zram 自建、SDDC 九步接入法、编译与四步验证、打包 9 层安全、分支维护建议、踩坑记录 7 条、命令速查 |
-| [sddc-into-zram.md](sddc-into-zram.md) |
-| 走 Crystal 路线编 zram.ko | [build-own-zram.md](build-own-zram.md) | **从零做带 SDDC 的 zram 操作手册**（34 KB，9 章 + 3 附录）：三条源码获取途径对比、内核树获取与前置检查、zram 驱动骨架详解（模块入口在 core.c、block_device_operations、核心数据结构、sysfs 接口）、路线 A 基于 Crystal 改、路线 B 从标准 zram 自建、SDDC 九步接入法、编译与四步验证、打包 9 层安全、分支维护建议、踩坑记录 7 条、命令速查 |
-| [sddc-into-zram.md](sddc-into-zram.md) | **SDDC 编进 zram.ko 实施手册**：三条链路（编译链接/后端支持 delta/运行时创建）、Makefile 改法、NEON 必需性、六条接点调用位置、三个锁的层级、从零编译步骤、产物验证、可调参数、已知 bug 与改造优先级、完整检查清单、源码位置速查表 |
-| [crystal-route.md](crystal-route.md) |
+| 从 AOSP 自建 zram + SDDC | [build-own-zram.md](build-own-zram.md) |
+| 对照 Crystal 的 SDDC 集成接点 | [sddc-into-zram.md](sddc-into-zram.md) |
+| 查看 Crystal 的源码和读回问题 | [crystal-route.md](crystal-route.md) |
 | 把 SDDC 移植到 5.10 内核 | [port-5.10.md](port-5.10.md) |
 | 看 OPPO 系进阶手法（early.rc/bind mount）| [oplus-advanced.md](oplus-advanced.md) |
 
@@ -35,9 +32,9 @@
 | 文档 | 内容 |
 |---|---|
 | [sddc-source.md](sddc-source.md) | **SDDC 源码档案**：来源链（华为→Crystal→下游变体）、两个变体对比、文件哈希、职责分工、DESIGN.md 章节导航、可调参数、许可证归属、上游获取方式、阅读顺序、已知降级 |
-| [build-own-zram.md](build-own-zram.md) | **从零做带 SDDC 的 zram 操作手册**（34 KB，9 章 + 3 附录）：三条源码获取途径对比、内核树获取与前置检查、zram 驱动骨架详解（模块入口在 core.c、block_device_operations、核心数据结构、sysfs 接口）、路线 A 基于 Crystal 改、路线 B 从标准 zram 自建、SDDC 九步接入法、编译与四步验证、打包 9 层安全、分支维护建议、踩坑记录 7 条、命令速查 |
-| [sddc-into-zram.md](sddc-into-zram.md) | **SDDC 编进 zram.ko 实施手册**：三条链路（编译链接/后端支持 delta/运行时创建）、Makefile 改法、NEON 必需性、六条接点调用位置、三个锁的层级、从零编译步骤、产物验证、可调参数、已知 bug 与改造优先级、完整检查清单、源码位置速查表 |
-| [crystal-route.md](crystal-route.md) | **Crystal 路线完整方案**：原理（自建 zram）、架构分层、SDDC 为何不能独立成 KO、out-of-tree 编译改造、支持内核矩阵（6.1/6.4/6.5/6.6/6.12）、需要准备什么、开源情况实测、已知问题（LZ4KDS 读回 bug）、后续改造方向 |
+| [build-own-zram.md](build-own-zram.md) | ACK 基线、Kleaf 构建、分步实现和读回验收 |
+| [sddc-into-zram.md](sddc-into-zram.md) | Crystal 的集成接点和生命周期参考 |
+| [crystal-route.md](crystal-route.md) | Crystal 源码归属、已知读回问题和设备集成说明 |
 | [oplus-advanced.md](oplus-advanced.md) | **OPPO 系进阶手法参考**：分析真实在用的 op13_zram_extend 模块，提取 early.rc 抢载、bind mount 覆盖原厂 KO、SELinux chcon、ksud 自动停用等 8 项手法，并标注哪些适合「只侧载」定位 |
 | [port-5.10.md](port-5.10.md) | **5.10 移植任务表**：14 项缺失 API（31 处调用）、5.10 原厂 zram 参照写法（带行号）、未覆盖风险清单、建议移植顺序、验证方法、替代方案 |
 
@@ -73,9 +70,8 @@
 |---|---|
 | `jkHXQ/RMX5010-lz4kds-zram` | **oplus 变体主源码**（`source-oplus/` 出处），含适配层兼容性与降级说明 |
 | `2108282/zram-lz4kds-sddc-houji-6.1` | **xiaomi 变体主源码**（`source-xiaomi/` 出处），含 DESIGN.md 与 KUnit 测试 |
-| `Wcoom/oneplus_sm8750_kernel` | Crystal HybridSwap 上游（SDDC 原始出处）|
+| `Wcoom/oneplus_sm8750_kernel` | Crystal HybridSwap 公开源码快照（`whitewhale0612` 仓库的 fork）|
 | `misaka5202/zram-lkm` | 通用 crypto 算法 LKM（预编译方案，5.10 可用） |
-| `okhsunrog/vpnhide-kmod` | 通用 GKI KO 构建流程范本 |
 | `bol-van/extract-symvers-ng` | 从二进制 vmlinux 抽 Module.symvers（备用 CRC 源） |
 
 ## 六、代码资产

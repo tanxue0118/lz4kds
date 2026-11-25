@@ -23,8 +23,9 @@ clang/
 clang-*/
 work/clang.env
 
-# ── 参考仓库克隆（用 .gitmodules 或文档链接代替）──
+# ── 参考仓库和本地归档 ──
 repos/
+/archive/
 
 # ── 系统与编辑器 ──
 .DS_Store

@@ -93,9 +93,10 @@ log "环境已写入: $ENV_FILE"
 if [ "$DO_COPY" = "1" ]; then
   case "$ROOT" in
     /mnt/*)
-      log "拷贝工作区到 $DEST（排除 work/ 大文件）..."
+      log "拷贝工作区到 $DEST（跳过构建缓存、旧归档和发布工作树）..."
       mkdir -p "$DEST"
-      rsync -a --exclude 'work/' --exclude 'dist/*.zip' "$ROOT"/ "$DEST"/ \
+      rsync -a --exclude 'work/' --exclude 'dist/*.zip' \
+        --exclude '/archive/' --exclude '/_publish/' "$ROOT"/ "$DEST"/ \
         || die "rsync 失败"
       # 把工具链也带过去（它可能就在 work/clang）
       if [ -d "$ROOT/work/clang" ]; then
