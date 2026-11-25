@@ -12,8 +12,11 @@
 | 让 AI 自动跑编译流程 | [../AGENTS.md](../AGENTS.md) |
 | 把取证脚本发给用户 | [../tools/给用户的取证说明.md](../tools/给用户的取证说明.md) |
 | 了解 SDDC 源码从哪来 | [sddc-source.md](sddc-source.md) |
-| **把 SDDC 编进 zram.ko（实施手册）** | [sddc-into-zram.md](sddc-into-zram.md) |
-| 走 Crystal 路线编 zram.ko | [sddc-into-zram.md](sddc-into-zram.md) | **SDDC 编进 zram.ko 实施手册**：三条链路（编译链接/后端支持 delta/运行时创建）、Makefile 改法、NEON 必需性、六条接点调用位置、三个锁的层级、从零编译步骤、产物验证、可调参数、已知 bug 与改造优先级、完整检查清单、源码位置速查表 |
+| **从零做一个带 SDDC 的 zram** | [build-own-zram.md](build-own-zram.md) |
+| 把 SDDC 编进已有 zram.ko | [build-own-zram.md](build-own-zram.md) | **从零做带 SDDC 的 zram 操作手册**（34 KB，9 章 + 3 附录）：三条源码获取途径对比、内核树获取与前置检查、zram 驱动骨架详解（模块入口在 core.c、block_device_operations、核心数据结构、sysfs 接口）、路线 A 基于 Crystal 改、路线 B 从标准 zram 自建、SDDC 九步接入法、编译与四步验证、打包 9 层安全、分支维护建议、踩坑记录 7 条、命令速查 |
+| [sddc-into-zram.md](sddc-into-zram.md) |
+| 走 Crystal 路线编 zram.ko | [build-own-zram.md](build-own-zram.md) | **从零做带 SDDC 的 zram 操作手册**（34 KB，9 章 + 3 附录）：三条源码获取途径对比、内核树获取与前置检查、zram 驱动骨架详解（模块入口在 core.c、block_device_operations、核心数据结构、sysfs 接口）、路线 A 基于 Crystal 改、路线 B 从标准 zram 自建、SDDC 九步接入法、编译与四步验证、打包 9 层安全、分支维护建议、踩坑记录 7 条、命令速查 |
+| [sddc-into-zram.md](sddc-into-zram.md) | **SDDC 编进 zram.ko 实施手册**：三条链路（编译链接/后端支持 delta/运行时创建）、Makefile 改法、NEON 必需性、六条接点调用位置、三个锁的层级、从零编译步骤、产物验证、可调参数、已知 bug 与改造优先级、完整检查清单、源码位置速查表 |
 | [crystal-route.md](crystal-route.md) |
 | 把 SDDC 移植到 5.10 内核 | [port-5.10.md](port-5.10.md) |
 | 看 OPPO 系进阶手法（early.rc/bind mount）| [oplus-advanced.md](oplus-advanced.md) |
@@ -32,6 +35,7 @@
 | 文档 | 内容 |
 |---|---|
 | [sddc-source.md](sddc-source.md) | **SDDC 源码档案**：来源链（华为→Crystal→下游变体）、两个变体对比、文件哈希、职责分工、DESIGN.md 章节导航、可调参数、许可证归属、上游获取方式、阅读顺序、已知降级 |
+| [build-own-zram.md](build-own-zram.md) | **从零做带 SDDC 的 zram 操作手册**（34 KB，9 章 + 3 附录）：三条源码获取途径对比、内核树获取与前置检查、zram 驱动骨架详解（模块入口在 core.c、block_device_operations、核心数据结构、sysfs 接口）、路线 A 基于 Crystal 改、路线 B 从标准 zram 自建、SDDC 九步接入法、编译与四步验证、打包 9 层安全、分支维护建议、踩坑记录 7 条、命令速查 |
 | [sddc-into-zram.md](sddc-into-zram.md) | **SDDC 编进 zram.ko 实施手册**：三条链路（编译链接/后端支持 delta/运行时创建）、Makefile 改法、NEON 必需性、六条接点调用位置、三个锁的层级、从零编译步骤、产物验证、可调参数、已知 bug 与改造优先级、完整检查清单、源码位置速查表 |
 | [crystal-route.md](crystal-route.md) | **Crystal 路线完整方案**：原理（自建 zram）、架构分层、SDDC 为何不能独立成 KO、out-of-tree 编译改造、支持内核矩阵（6.1/6.4/6.5/6.6/6.12）、需要准备什么、开源情况实测、已知问题（LZ4KDS 读回 bug）、后续改造方向 |
 | [oplus-advanced.md](oplus-advanced.md) | **OPPO 系进阶手法参考**：分析真实在用的 op13_zram_extend 模块，提取 early.rc 抢载、bind mount 覆盖原厂 KO、SELinux chcon、ksud 自动停用等 8 项手法，并标注哪些适合「只侧载」定位 |
