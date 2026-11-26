@@ -69,9 +69,9 @@ lz4kds/
 │   └── port-5.10.md       5.10 移植任务表（14 项 API / 31 处调用）
 ├── source-oplus/          ← OPPO hybridswap 骨架源码（oplus 路线用）
 ├── source-xiaomi/         ← Crystal HybridSwap 完整驱动源码（xiaomi 路线用）
-├── templates/
-│   ├── oplus/             ← 路线A：preinit 抢载（无预置 KO）
-│   └── xiaomi/            ← 路线B：zram.ko 替换（含熔断与还原）
+├── 模块模板/
+│   ├── 一加/             ← 路线A：preinit 抢载（无预置 KO）
+│   └── 小米/             ← 路线B：zram.ko 替换（含熔断与还原）
 ├── devices/               ← ★ 每设备一个文件夹
 │   └── TEMPLATE/          空白模板（build.conf）
 ├── work/                  ← 构建缓存、日志及本地内核树
@@ -88,7 +88,7 @@ lz4kds/
 | 依赖 | `oplus_bsp_zsmalloc.ko` 的 `zs_*_oplus` 导出 | 内核自带 zsmalloc |
 | 原厂位置 | `/vendor/lib/modules/` | `/system_dlkm/flatten/lib/modules/` |
 | 加载时机 | KSU preinit（SELinux 前） | post-fs-data（rmmod → insmod） |
-| 模板 | `templates/oplus/` | `templates/xiaomi/` |
+| 模板 | `模块模板/一加/` | `模块模板/小米/` |
 | 源码放置路径 | `vendor/oplus/kernel/mm/hybridswap_zram` | `drivers/block/zram` |
 | 产物 KO 名 | `oplus_bsp_hybridswap_zram.ko` | `zram.ko` |
 
@@ -245,7 +245,7 @@ ARCH=xiaomi FRESH_DIR=<编译产物目录> bash tools/repack.sh <zram.ko>
 - **定位单一**：只把 lz4kds 算法侧载进运行内存
   - 不做容量配置、不做算法切换 UI、不带 WebUI、不带 zram.sh
   - 容量与算法请用户走系统侧
-- **模板不预置 KO**：`templates/oplus/preinit/` 只有占位 preinit.conf，
+- **模板不预置 KO**：`模块模板/一加/preinit/` 只有占位 preinit.conf，
   KO 与最终 preinit.conf 由 repack.sh 从编译产物注入生成
 - **oplus 加载顺序固定**：`insmod zsmalloc` → `insmod hybridswap zram_algo=<X>`，不可颠倒
 

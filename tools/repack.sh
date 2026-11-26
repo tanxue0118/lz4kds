@@ -24,8 +24,11 @@ case "$ARCH" in
   *) echo "[repack] FAILED: ARCH 必须是 oplus 或 xiaomi（当前: $ARCH）"; exit 2 ;;
 esac
 
-TPL="templates/$ARCH"
-[ -d "$TPL" ] || { echo "[repack] FAILED: 缺模板目录 $TPL"; exit 2; }
+case "$ARCH" in
+  oplus) TPL="模块模板/一加" ;;
+  xiaomi) TPL="模块模板/小米" ;;
+esac
+[ -d "$TPL" ] || { echo "[repack] FAILED: 缺模块模板目录 $TPL"; exit 2; }
 
 [ $# -ge 1 ] || { echo "[repack] 用法: ARCH=<oplus|xiaomi> bash repack.sh <ko> [more.ko ...]"; exit 2; }
 for ko in "$@"; do

@@ -188,7 +188,11 @@ case "$ARCH" in
   oplus|xiaomi) log "架构: $ARCH" ;;
   *) die "[arch] type=$ARCH 无效（必须是 oplus / xiaomi / auto / 留空）" ;;
 esac
-[ -d "$ROOT/templates/$ARCH" ] || die "缺模板目录 templates/$ARCH"
+case "$ARCH" in
+  oplus) TEMPLATE_DIR="$ROOT/模块模板/一加" ;;
+  xiaomi) TEMPLATE_DIR="$ROOT/模块模板/小米" ;;
+esac
+[ -d "$TEMPLATE_DIR" ] || die "缺模块模板目录: $TEMPLATE_DIR"
 
 # 1.1 页大小
 PS=$(tr -d '[:space:]' < "$DEVDIR/page_size.txt" 2>/dev/null || echo "")

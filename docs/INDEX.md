@@ -80,8 +80,8 @@
 |---|---|
 | `source-oplus/` | OPPO hybridswap 骨架 + SDDC（oplus 变体） |
 | `source-xiaomi/` | Crystal HybridSwap 完整驱动 + SDDC + DESIGN.md（xiaomi 变体） |
-| `templates/oplus/` | KSU 模板：preinit 抢载路线（无预置 KO） |
-| `templates/xiaomi/` | KSU 模板：zram.ko 热替换路线（含 9 层安全） |
+| `模块模板/一加/` | KSU 模板：preinit 抢载路线（无预置 KO） |
+| `模块模板/小米/` | KSU 模板：zram.ko 热替换路线（含 9 层安全） |
 | `tools/` | 工具链：recon / get-clang / wsl-setup / extract_crcs / crc_align / symgate / repack |
 | `pipeline.sh` | 9 阶段双架构流水线 |
 

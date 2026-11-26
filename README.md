@@ -18,7 +18,7 @@
 | 依赖 | `oplus_bsp_zsmalloc.ko`（**必须先加载**，导出 `zs_*_oplus`）|
 | 原厂位置 | `/vendor/lib/modules/` |
 | 加载时机 | KSU **preinit**（SELinux 策略加载前）|
-| 模板 | `templates/oplus/` |
+| 模板 | `模块模板/一加/` |
 
 **为什么需要两个 KO：**
 
@@ -35,7 +35,7 @@
 | 依赖 | 内核自带 zsmalloc，无需额外 KO |
 | 原厂位置 | `/system_dlkm/flatten/lib/modules/zram.ko` |
 | 加载时机 | `post-fs-data`（rmmod 原厂 → insmod 自编）|
-| 模板 | `templates/xiaomi/` |
+| 模板 | `模块模板/小米/` |
 
 小米没有 `oplus_bsp_*` 这套私有驱动，走的是用 `crystal_hybridswap` 完整驱动整份替换 `zram.ko`。安全设计三层：
 
@@ -59,7 +59,7 @@
 ⑤ dist/lz4kds侧载-<arch>-<日期>-<hash>.zip   ← 最终包
 ```
 
-**模板里不预置任何 KO**（`templates/oplus/preinit/` 只有空的 preinit.conf 占位），
+**模板里不预置任何 KO**（`模块模板/一加/preinit/` 只有空的 preinit.conf 占位），
 KO 全部由 `repack.sh` 从编译产物注入，`preinit.conf` 也在此时自动生成。
 
 `repack.sh` 支持 `FRESH_DIR` 新鲜度校验：指定后，传入的 KO 必须位于该目录内，
@@ -81,10 +81,10 @@ lz4kds/
 │   └── oplus-advanced.md      OPPO 系进阶手法参考（early.rc/bind mount）
 ├── source-oplus/              ← OPPO hybridswap 骨架源码（oplus 路线，来自 jkHXQ）
 ├── source-xiaomi/             ← Crystal HybridSwap 完整驱动源码（xiaomi 路线，来自 2108282/houji）
-├── templates/
-│   ├── oplus/                 ← 路线A：preinit 抢载（module.prop/customize.sh/service.sh/
+├── 模块模板/
+│   ├── 一加/                 ← 路线A：preinit 抢载（module.prop/customize.sh/service.sh/
 │   │                            uninstall.sh/preinit/preinit.conf）—— 无预置 KO
-│   └── xiaomi/                ← 路线B：zram.ko 替换（含 post-fs-data.sh 的熔断与还原逻辑）
+│   └── 小米/                 ← 路线B：zram.ko 替换（含 post-fs-data.sh 的熔断与还原逻辑）
 ├── devices/                   ← ★ 每台设备一个文件夹
 │   └── TEMPLATE/              空白模板（build.conf 含 [arch] type 选择）
 ├── tools/
