@@ -3,4 +3,4 @@ name=LZ4KDS侧载
 version=1.0
 versionCode=1
 author=一只做梦的猫
-description=LZ4KD+SDDC 侧载｜相同页共享、相似页只存差异｜KO 侧载只改运行内存不写分区｜preinit 最早接管，失败自动回退原厂
+description=LZ4KD+SDDC 侧载｜OPPO/一加 hybridswap preinit 接管｜失败回退原厂

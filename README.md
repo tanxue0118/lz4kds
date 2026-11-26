@@ -130,6 +130,25 @@ export ANDROID_CLANG=/path/to/clang-r*/bin
 
 产物用于当前 ACK 构建的开发验证。目标设备模块加载、数据读回和侧载打包见 [ACK 自建指南](docs/build-own-zram.md)。既有设备侧载流程仍使用本地流水线和设备取证目录。
 
+### 手工打包小米模块
+
+手工打包时，先确认自编 KO 与目标机内核 ABI/KMI 相符，再把它放到小米模板包根目录并命名为 `zram.ko`。模板还要求目标设备原厂 `zram.ko` 位于 `stock/zram.ko`，供加载失败回滚。包内布局如下：
+
+```text
+lz4kds_sidecar/
+├── module.prop
+├── customize.sh
+├── post-fs-data.sh
+├── service.sh
+├── uninstall.sh
+├── zram.ko                 ← dist/zram 内核.ko 改名放入
+├── zram.ko.sha256          ← customize.sh 安装时生成
+└── stock/
+    └── zram.ko             ← 目标设备原厂 KO，回滚用
+```
+
+可以从 `模块模板/小米/` 复制脚本和 `module.prop`，再按上面补入两个 KO 后压缩目录内容。模板根目录自身没有 `stock/zram.ko`。ACK 构建 KO 的目标架构为 ARM64、页大小 4 KiB；改文件名只满足包内文件名要求，不会改变模块 ABI 或替代真机加载验证。
+
 ## 四、最快用法
 
 ```bash
