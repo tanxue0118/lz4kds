@@ -1,0 +1,6096 @@
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index a0a29cfceb139030d4b1589b8dae67e50c0bd240..13af56f3fc57ae659f8c23f34039ebadb004e93d 100644
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -329,6 +329,8 @@ CONFIG_ARM_SCPI_PROTOCOL=y
+ # CONFIG_EFI_ARMSTUB_DTB_LOADER is not set
+ CONFIG_GNSS=y
+ CONFIG_ZRAM=m
++CONFIG_ZRAM_SDDC=y
++CONFIG_ZRAM_DEF_COMP_LZ4KDS=y
+ CONFIG_ZRAM_WRITEBACK=y
+ CONFIG_ZRAM_MULTI_COMP=y
+ CONFIG_BLK_DEV_LOOP=y
+diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
+index af201392ed52cfd5590474f778c27a155ca5394a..701f28cab3eb7e8ff6b5f0f33ad775832e3999bb 100644
+--- a/drivers/block/zram/Kconfig
++++ b/drivers/block/zram/Kconfig
+@@ -15,6 +15,21 @@ config ZRAM
+ 
+ 	  See Documentation/admin-guide/blockdev/zram.rst for more information.
+ 
++config ZRAM_SDDC
++	bool "LZ4KDS SDDC similarity and delta compression"
++	depends on ZRAM
++	depends on ARM64_4K_PAGES || UML
++	default n
++	help
++	  Add the private LZ4KD backend and the SDDC integration layer to
++	  zram. This is an opt-in development feature; standard zram
++	  compressors remain unchanged.
++
++config ZRAM_SDDC_KUNIT_TEST
++	bool "KUnit tests for LZ4KDS codec and SDDC"
++	depends on ZRAM_SDDC && KUNIT=y
++	default n
++
+ choice
+ 	prompt "Default zram compressor"
+ 	default ZRAM_DEF_COMP_LZORLE
+@@ -32,6 +47,10 @@ config ZRAM_DEF_COMP_LZ4
+ 	bool "lz4"
+ 	depends on CRYPTO_LZ4
+ 
++config ZRAM_DEF_COMP_LZ4KDS
++	bool "lz4kds"
++	depends on ZRAM_SDDC
++
+ config ZRAM_DEF_COMP_LZO
+ 	bool "lzo"
+ 	depends on CRYPTO_LZO
+@@ -51,6 +70,7 @@ config ZRAM_DEF_COMP
+ 	default "lzo-rle" if ZRAM_DEF_COMP_LZORLE
+ 	default "zstd" if ZRAM_DEF_COMP_ZSTD
+ 	default "lz4" if ZRAM_DEF_COMP_LZ4
++	default "lz4kds" if ZRAM_DEF_COMP_LZ4KDS
+ 	default "lzo" if ZRAM_DEF_COMP_LZO
+ 	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
+ 	default "842" if ZRAM_DEF_COMP_842
+diff --git a/drivers/block/zram/Makefile b/drivers/block/zram/Makefile
+index de9e457907b1e9834937df323413bd11d18f5d5c..c6a220ddd6c1e2715f4e222ca6739dd583a23ab5 100644
+--- a/drivers/block/zram/Makefile
++++ b/drivers/block/zram/Makefile
+@@ -1,4 +1,16 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+-zram-y	:=	zcomp.o zram_drv.o
++zram-y := zcomp.o zram_drv.o
+ 
+-obj-$(CONFIG_ZRAM)	+=	zram.o
++zram-$(CONFIG_ZRAM_SDDC) += \
++	sddc/zram_sddc.o \
++	sddc/zram_sddc_codec.o \
++	sddc/lz4kd/lz4kd_encode.o \
++	sddc/lz4kd/lz4kd_encode_delta.o \
++	sddc/lz4kd/lz4kd_decode.o
++
++# Start with the scalar implementation; NEON can be added after the ACK
++# integration has a bit-for-bit regression suite.
++
++obj-$(CONFIG_ZRAM) += zram.o
++
++zram-$(CONFIG_ZRAM_SDDC_KUNIT_TEST) += sddc/zram_sddc_codec_test.o
+diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd.h b/drivers/block/zram/sddc/lz4kd/lz4kd.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6eb9e23a2135aa132b958ba65e6676f2644289e
+--- /dev/null
++++ b/drivers/block/zram/sddc/lz4kd/lz4kd.h
+@@ -0,0 +1,250 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2022. All rights reserved.
++ * Description: LZ4K compression algorithm with delta compression
++ */
++
++#ifndef _LZ4KD_H
++#define _LZ4KD_H
++
++/* file lz4kd.h
++  This file contains the platform-independent API of LZ-class
++  lossless codecs (compressors/decompressors) with complete
++  in-place documentation.  The documentation is formatted
++  in accordance with DOXYGEN mark-up format.  So, one can
++  generate proper documentation, e.g. in HTML format, using DOXYGEN.
++
++  Currently, LZ-class codecs, documented here, implement following
++  algorithms for lossless data compression/decompression:
++  \li "LZ" proprietary codec competing with LZ4 - lz4kd_encode(),
++  lz4kd_encode_delta(), lz4kd_decode(), lz4kd_decode_delta()
++
++  The LZ compressors accept any data as input and compress it
++  without loss to a smaller size if possible.
++  Compressed data produced by lz4kd_encode() is decoded by lz4kd_decode();
++  delta data produced by lz4kd_encode_delta() requires the reference-aware
++  lz4kd_decode_delta() API documented below.\n
++  */
++
++/*
++  lz4kd_status defines simple set of status values returned by APIs
++ */
++typedef enum {
++	LZ4K_STATUS_INCOMPRESSIBLE =  0, /* !< Return when data is incompressible */
++	LZ4K_STATUS_FAILED         = -1, /* !< Return on general failure */
++	LZ4K_STATUS_READ_ERROR =     -2, /* !< Return when data reading failed */
++	LZ4K_STATUS_WRITE_ERROR =    -3  /* !< Return when data writing failed */
++} lz4kd_status;
++
++/*
++  lz4kd_encode_state_bytes_min() returns number of bytes for state parameter,
++  supplied to lz4kd_encode(), lz4kd_encode_delta().
++  So, state should occupy at least lz4kd_encode_state_bytes_min() for mentioned
++  functions to work correctly.
++ */
++unsigned crystal_lz4kd_encode_state_bytes_min(void);
++
++/*
++  lz4kd_encode() encodes/compresses one input buffer at *in, places
++  result of encoding into one output buffer at *out if encoded data
++  size fits specified values of out_max and out_limit.
++  It returs size of encoded data in case of success or value<=0 otherwise.
++  The result of successful encoding is in proprietary format, that
++  is the encoded data can be decoded only by lz4kd_decode().
++
++  \return
++    \li positive value\n
++      if encoding was successful. The value returned is the size of encoded
++      (compressed) data always <=out_max.
++    \li non-positive value\n
++      if in==0||in_max==0||out==0||out_max==0 or
++      if out_max is less than needed for encoded (compressed) data.
++    \li 0 value\n
++      if encoded data size >= out_limit
++
++  \param[in] state
++    !=0, pointer to state buffer used internally by the function.  Size of
++    state in bytes should be at least lz4kd_encode_state_bytes_min().  The content
++    of state buffer will be changed during encoding.
++
++  \param[in] in
++    !=0, pointer to the input buffer to encode (compress).  The content of
++    the input buffer does not change during encoding.
++
++  \param[in] out
++    !=0, pointer to the output buffer where to place result of encoding
++    (compression).
++    If encoding is unsuccessful, e.g. out_max or out_limit are less than
++    needed for encoded data then content of out buffer may be arbitrary.
++
++  \param[in] in_max
++    !=0, size in bytes of the input buffer at *in
++
++  \param[in] out_max
++    !=0, size in bytes of the output buffer at *out
++
++  \param[in] out_limit
++    encoded data size soft limit in bytes. Due to performance reasons it is
++    not guaranteed that
++    lz4kd_encode will always detect that resulting encoded data size is
++    bigger than out_limit.
++    Hovewer, when reaching out_limit is detected, lz4kd_encode() returns
++    earlier and spares CPU cycles.  Caller code should recheck result
++    returned by lz4kd_encode() (value greater than 0) if it is really
++    less or equal than out_limit.
++    out_limit is ignored if it is equal to 0.
++ */
++int crystal_lz4kd_encode(
++	void *const state,
++	const void *const in,
++	void *out,
++	unsigned in_max,
++	unsigned out_max,
++	unsigned out_limit);
++
++/*
++  lz4kd_encode_delta() encodes (compresses) data from one input buffer
++  using one reference buffer as dictionary and places the result of
++  compression into one output buffer.
++  The result of successful compression is in proprietary format, so
++  that compressed data can be decompressed only by lz4kd_decode_delta().
++  Reference/dictionary buffer and input buffer should be contiguous in
++  memory.
++
++  \return
++    \li positive value\n
++      if encoding was successful. The value returned is the size of encoded
++      (compressed) data.
++    \li non-positive value\n
++      if state==0||in0==0||in==0||in_max==0||out==0||out_max==0 or
++      if out_max is less than needed for encoded (compressed) data.
++
++  \param[in] state
++    !=0, pointer to state buffer used internally by the function.  Size of
++    state in bytes should be at least lz4kd_encode_state_bytes_min().
++    The content of state buffer is zeroed at the beginning of
++    lz4kd_encode_delta().
++    The content of state will be changed during encoding.
++
++  \param[in] in0
++    !=0, pointer to the reference/dictionary input buffer that was used as
++    input to preceding call of lz4kd_encode().
++    The content of the reference/dictionary input buffer does not change
++    during encoding.
++
++  \param[in] in
++    !=0, pointer to the input buffer to encode (compress).  The input buffer
++    is compressed using content of the reference/dictionary input buffer at
++    in0. The content of the input buffer does not change during encoding.
++    The two buffers - at *in0 and at *in - should be contiguous in memory.
++    That is, the last byte of buffer at *in0 is located exactly before byte
++    at *in.
++
++  \param[in] out
++    !=0, pointer to the output buffer where to place result of encoding
++    (compression). If compression is unsuccessful then content of out
++    buffer may be arbitrary.
++
++  \param[in] in_max
++    !=0, size in bytes of the input buffer at *in
++
++  \param[in] out_max
++    !=0, size in bytes of the output buffer at *out.
++ */
++int crystal_lz4kd_encode_delta(
++	void *const state,
++	const void *const in0,
++	const void *const in,
++	void *out,
++	unsigned in_max,
++	unsigned out_max,
++	unsigned out_limit);
++
++/*
++  lz4kd_decode() decodes (decompresses) data from one input buffer and places
++  the result of decompression into one output buffer.  The encoded data in input
++  buffer should be in proprietary format produced by lz4kd_encode().
++
++  \return
++    \li positive value\n
++      if decoding was successful. The value returned is the size of decoded
++      (decompressed) data.
++    \li non-positive value\n
++      if in==0||in_max==0||out==0||out_max==0 or
++      if out_max is less than needed for decoded (decompressed) data or
++      if input encoded data format is corrupted.
++
++  \param[in] in
++    !=0, pointer to the input buffer to decode (decompress).  The content of
++    the input buffer does not change during decoding.
++
++  \param[in] out
++    !=0, pointer to the output buffer where to place result of decoding
++    (decompression). If decompression is unsuccessful then content of out
++    buffer may be arbitrary.
++
++  \param[in] in_max
++    !=0, size in bytes of the input buffer at in
++
++  \param[in] out_max
++    !=0, size in bytes of the output buffer at out
++ */
++int crystal_lz4kd_decode(
++	const void *const in,
++	void *const out,
++	unsigned in_max,
++	unsigned out_max);
++
++/*
++  lz4kd_decode_delta() decodes (decompresses) data from one input buffer
++  and places the result of decompression into one output buffer.  The
++  compressed data in input buffer should be in format, produced by
++  lz4kd_encode_delta().
++
++  Example sequence of calls for lz4kd_decode and lz4kd_decode_delta:
++//dictionary (1st) block
++    int result0=lz4kd_decode(in0, out0, in_max0, out_max0);
++//delta (2nd) block
++    int result1=lz4kd_decode_delta(in, out0, out, in_max, out_max);
++
++  \return
++    \li positive value\n
++      if decoding was successful. The value returned is the size of decoded
++      (decompressed) data.
++    \li non-positive value\n
++      if in==0||in_max==0||out==0||out_max==0 or
++      if out_max is less than needed for decoded (decompressed) data or
++      if input data format is corrupted.
++
++  \param[in] in
++    !=0, pointer to the input buffer to decode (decompress).  The content of
++    the input buffer does not change during decoding.
++
++  \param[in] out0
++    !=0, pointer to the dictionary input buffer that was used as in0 input to
++    lz4kd_encode_delta().  The content
++    of the dictionary input buffer does not change during decoding.
++
++  \param[in] out
++    !=0, pointer to the output buffer where to place result of decoding
++    (decompression). If decompression is unsuccessful then content of out
++    buffer may be arbitrary.
++    The two buffers - at *out0 and at *out - should be contiguous in memory.
++    That is, the last byte of buffer at *out0 is located exactly before byte
++    at *out.
++
++  \param[in] in_max
++    !=0, size in bytes of the input buffer at *in
++
++  \param[in] out_max
++    !=0, size in bytes of the output buffer at *out
++ */
++int crystal_lz4kd_decode_delta(
++	const void *in,
++	const void *const out0,
++	void *const out,
++	unsigned in_max,
++	unsigned out_max);
++
++
++#endif /* _LZ4KD_H */
+diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_decode.c b/drivers/block/zram/sddc/lz4kd/lz4kd_decode.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b5696e1bdf654fca1746900b54d34bc999442d0
+--- /dev/null
++++ b/drivers/block/zram/sddc/lz4kd/lz4kd_decode.c
+@@ -0,0 +1,264 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2022. All rights reserved.
++ * Description: LZ4K compression algorithm with delta compression
++ */
++
++#include "lz4kd.h"
++
++#include "lz4kd_private.h" /* types, etc */
++
++static const uint8_t *get_size(
++	uint_fast32_t *size,
++	const uint8_t *in_at,
++	const uint8_t *const in_end)
++{
++	uint_fast32_t u;
++	do {
++		if (unlikely(in_at >= in_end))
++			return NULL;
++		*size += (u = *(const uint8_t*)in_at);
++		++in_at;
++	} while (BYTE_MAX == u);
++	return in_at;
++}
++
++static int end_of_block(
++	const uint_fast32_t nr_bytes_max,
++	const uint_fast32_t r_bytes_max,
++	const uint8_t *const in_at,
++	const uint8_t *const in_end,
++	const uint8_t *const out,
++	const uint8_t *const out_at)
++{
++	if (!nr_bytes_max)
++		return LZ4K_STATUS_FAILED; /* should be the last one in block */
++	if (r_bytes_max != REPEAT_MIN)
++		return LZ4K_STATUS_FAILED; /* should be the last one in block */
++	if (in_at != in_end)
++		return LZ4K_STATUS_FAILED; /* should be the last one in block */
++	return (int)(out_at - out);
++}
++
++enum {
++	NR_COPY_MIN = 16,
++	R_COPY_MIN = 16,
++	R_COPY_SAFE_2X = (R_COPY_MIN << 1) - 1
++};
++
++static bool out_non_repeat(
++	const uint8_t **in_at,
++	uint8_t **out_at,
++	uint_fast32_t nr_bytes_max,
++	const uint8_t *const in_end,
++	const uint8_t *const out_end)
++{
++	size_t in_left;
++	size_t out_left;
++	size_t copy_left;
++	const uint8_t *in_copy_end;
++	uint8_t *out_copy_end;
++
++	in_left = (size_t)(in_end - *in_at);
++	out_left = (size_t)(out_end - *out_at);
++	copy_left = in_left < out_left ? in_left : out_left;
++	if (unlikely(nr_bytes_max > copy_left))
++		return false;
++	in_copy_end = *in_at + nr_bytes_max;
++	out_copy_end = *out_at + nr_bytes_max;
++	if (likely(nr_bytes_max <= NR_COPY_MIN)) {
++		if (likely(copy_left >= NR_COPY_MIN))
++			m_copy(*out_at, *in_at, NR_COPY_MIN);
++		else
++			m_copy(*out_at, *in_at, nr_bytes_max);
++	} else { /* nr_bytes_max>NR_COPY_MIN */
++		if (likely(copy_left - nr_bytes_max >= NR_COPY_MIN)) {
++			m_copy(*out_at, *in_at, NR_COPY_MIN);
++			copy_x_while_lt(*out_at + NR_COPY_MIN,
++					*in_at + NR_COPY_MIN,
++					out_copy_end, NR_COPY_MIN);
++		} else {
++			m_copy(*out_at, *in_at, nr_bytes_max);
++		}
++	} /* if (nr_bytes_max <= NR_COPY_MIN) */
++	*in_at = in_copy_end;
++	*out_at = out_copy_end;
++	return true;
++}
++
++static void out_repeat_overlap(
++	uint_fast32_t offset,
++	uint8_t *out_at,
++	const uint8_t *out_from,
++	const uint8_t *const out_copy_end)
++{
++	enum {
++		COPY_MIN = R_COPY_MIN >> 1,
++		OFFSET_LIMIT = COPY_MIN >> 1
++	};
++	m_copy(out_at, out_from, COPY_MIN);
++/* (1 < offset < R_COPY_MIN/2) && out_copy_end + R_COPY_SAFE_2X  <= out_end */
++	out_at += offset;
++	if (offset <= OFFSET_LIMIT)
++		offset <<= 1;
++	do {
++		m_copy(out_at, out_from, COPY_MIN);
++		out_at += offset;
++		if (offset <= OFFSET_LIMIT)
++			offset <<= 1;
++	} while (out_at - out_from < R_COPY_MIN);
++	while_lt_copy_2x_as_x2(out_at, out_from, out_copy_end, R_COPY_MIN);
++}
++
++static void out_repeat_slow(
++	uint_fast32_t r_bytes_max,
++	uint_fast32_t offset,
++	uint8_t *out_at,
++	const uint8_t *out_from,
++	const uint8_t *const out_copy_end,
++	const uint8_t *const out_safe_end)
++{
++	if (offset > 1 && out_copy_end <= out_safe_end) {
++		out_repeat_overlap(offset, out_at, out_from, out_copy_end);
++	} else {
++		if (offset == 1) {
++			m_set(out_at, *out_from, r_bytes_max);
++		} else {
++			do
++				*out_at++ = *out_from++;
++			while (out_at < out_copy_end);
++		}
++	}
++}
++
++static int decode(
++	const uint8_t *in_at,
++	const uint8_t *const out0,
++	uint8_t *const out,
++	const uint8_t *const in_end,
++	const uint8_t *const out_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t r_log2 = TAG_BITS_MAX - (off_log2 + nr_log2);
++	const uint8_t *const in_tag_end = in_end - TAG_BYTES_MAX;
++	const uint8_t *const out_safe_end =
++		(size_t)(out_end - out) >= R_COPY_SAFE_2X ?
++		out_end - R_COPY_SAFE_2X : out;
++	uint8_t *out_at = out;
++	while (likely(in_at <= in_tag_end)) {
++		const uint_fast32_t utag = read4_at(in_at - 1) >> BYTE_BITS;
++		const uint_fast32_t offset = utag & mask(off_log2);
++		uint_fast32_t nr_bytes_max = utag >> (off_log2 + r_log2),
++			      r_bytes_max = ((utag >> off_log2) & mask(r_log2)) +
++					    REPEAT_MIN;
++		const uint8_t *out_from = NULL;
++		uint8_t *out_copy_end = NULL;
++		in_at += TAG_BYTES_MAX;
++		if (unlikely(nr_bytes_max == mask(nr_log2))) {
++			in_at = get_size(&nr_bytes_max, in_at, in_end);
++			if (unlikely(in_at == NULL))
++				return LZ4K_STATUS_READ_ERROR;
++		}
++		if (!out_non_repeat(&in_at, &out_at, nr_bytes_max, in_end, out_end))
++			return LZ4K_STATUS_FAILED;
++		if (unlikely(r_bytes_max == mask(r_log2) + REPEAT_MIN)) {
++			in_at = get_size(&r_bytes_max, in_at, in_end);
++			if (unlikely(in_at == NULL))
++				return LZ4K_STATUS_READ_ERROR;
++		}
++		if (unlikely(offset == 0))
++			return end_of_block(nr_bytes_max, r_bytes_max, in_at,
++					    in_end, out, out_at);
++		if (unlikely(offset > (uintptr_t)out_at - (uintptr_t)out0 ||
++			     r_bytes_max > (size_t)(out_end - out_at)))
++			return LZ4K_STATUS_FAILED;
++		out_from = out_at - offset;
++		out_copy_end = out_at + r_bytes_max;
++		if (likely(offset >= R_COPY_MIN &&
++			   out_copy_end <= out_safe_end)) {
++			copy_2x_as_x2_while_lt(out_at, out_from, out_copy_end,
++					       R_COPY_MIN);
++		} else if (likely(offset >= (R_COPY_MIN >> 1) &&
++				  out_copy_end <= out_safe_end)) {
++			m_copy(out_at, out_from, R_COPY_MIN);
++			out_at += offset;
++			while_lt_copy_x(out_at, out_from, out_copy_end, R_COPY_MIN);
++		} else {
++			out_repeat_slow(r_bytes_max, offset, out_at, out_from,
++				out_copy_end, out_safe_end);
++		}
++		out_at = out_copy_end;
++	}
++	return in_at == in_end ? (int)(out_at - out) : LZ4K_STATUS_FAILED;
++}
++
++static int decode_pattern_4kb(
++	const uint8_t *const in,
++	uint8_t *const out,
++	const uint8_t *const out_end)
++{
++	const uint64_t pattern = read8_at(in);
++	uint8_t *out_at = out;
++
++	while ((size_t)(out_end - out_at) >= sizeof(pattern)) {
++		m_copy(out_at, &pattern, sizeof(pattern));
++		out_at += sizeof(pattern);
++	}
++	return out_at == out_end ? (int)(out_end - out) : LZ4K_STATUS_FAILED;
++}
++
++static int decode_4kb(
++	const uint8_t *const in,
++	uint8_t *const out,
++	const uint8_t *const in_end,
++	const uint8_t *const out_end)
++{
++	return decode(in, out, out, in_end, out_end, NR_4KB_LOG2,
++			BLOCK_4KB_LOG2);
++}
++
++int crystal_lz4kd_decode(
++	const void *in,
++	void *const out,
++	unsigned int in_max,
++	unsigned int out_max)
++{
++	const uint8_t *in_end;
++	uint8_t *out_end;
++
++	if (unlikely(!crystal_lz4kd_valid_range(in, in_max, out, out_max,
++			2 + TAG_BYTES_MAX, 2U << BLOCK_4KB_LOG2,
++			1U << BLOCK_4KB_LOG2)))
++		return LZ4K_STATUS_FAILED;
++	in_end = (const uint8_t *)in + in_max;
++	out_end = (uint8_t *)out + out_max;
++	if (unlikely(in_max == PATTERN_BYTES_MAX))
++		return decode_pattern_4kb((const uint8_t*)in, (uint8_t*)out,
++				out_end);
++	return decode_4kb((const uint8_t*)in + 1, (uint8_t*)out, in_end, out_end);
++}
++
++int crystal_lz4kd_decode_delta(
++	const void *in,
++	const void *const out0,
++	void *const out,
++	unsigned int in_max,
++	unsigned int out_max)
++{
++	uintptr_t out0_addr = (uintptr_t)out0;
++	uintptr_t out_addr = (uintptr_t)out;
++
++	if (unlikely(!out0 || out0_addr > out_addr ||
++		     out_addr - out0_addr > (1U << BLOCK_4KB_LOG2)))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(!crystal_lz4kd_valid_range(in, in_max, out, out_max,
++			2 + TAG_BYTES_MAX, 2U << BLOCK_4KB_LOG2,
++			1U << BLOCK_4KB_LOG2)))
++		return LZ4K_STATUS_FAILED;
++
++	return decode((const uint8_t *)in + 1, out0, out,
++			(const uint8_t *)in + in_max,
++			(uint8_t *)out + out_max, NR_8KB_LOG2,
++			BLOCK_8KB_LOG2);
++}
+diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_encode.c b/drivers/block/zram/sddc/lz4kd/lz4kd_encode.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..28799400fabbe9a8a5baad4aeacb15edcdb941ae
+--- /dev/null
++++ b/drivers/block/zram/sddc/lz4kd/lz4kd_encode.c
+@@ -0,0 +1,435 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2022. All rights reserved.
++ * Description: LZ4K compression algorithm with delta compression
++ */
++
++/* Keep the first ACK port on the scalar path until its CPU-hotplug/FP state
++ * handling is integrated and validated for each target branch. */
++#undef CONFIG_KERNEL_MODE_NEON
++
++#include "lz4kd.h"
++
++#include "lz4kd_private.h"
++#include "lz4kd_encode_private.h"
++
++#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
++#include <asm/neon.h>
++#include <asm/simd.h>
++#include "lz4kd_neon.h"
++#endif
++
++enum {
++	HT_LOG2 = 12, /* ==11 #3 max drop in CR */
++	STEP_LOG2 = 5 /* ==3 #2 avg drop in CR */
++};
++
++unsigned crystal_lz4kd_encode_state_bytes_min(void)
++{
++	/* The delta encoder needs a 13-bit hash and offset table. */
++	return 1U << 15;
++}
++
++/* minimum encoded size for non-compressible data */
++inline static uint_fast32_t encoded_bytes_min(
++	uint_fast32_t nr_log2,
++	uint_fast32_t in_max)
++{
++	return in_max < mask(nr_log2) ?
++		TAG_BYTES_MAX + in_max :
++		TAG_BYTES_MAX + size_bytes_count(in_max - mask(nr_log2)) + in_max;
++}
++
++inline static void  update_utag(
++	uint_fast32_t r_bytes_max,
++	uint_fast32_t *utag,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t r_mask = mask(TAG_BITS_MAX - (off_log2 + nr_log2));
++	*utag |= likely(r_bytes_max - REPEAT_MIN < r_mask) ?
++		 ((r_bytes_max - REPEAT_MIN) << off_log2) : (r_mask << off_log2);
++}
++
++inline static uint8_t *out_size_bytes(uint8_t *out_at, uint_fast32_t u)
++{
++	for (; u >= BYTE_MAX; *out_at++ = (uint8_t)BYTE_MAX, u -= BYTE_MAX);
++	*out_at++ = (uint8_t)u;
++	return out_at;
++}
++
++inline static uint8_t *out_utag_then_bytes_left(
++	uint8_t *out_at,
++	uint_fast32_t utag,
++	uint_fast32_t bytes_left)
++{
++	m_copy(out_at, &utag, TAG_BYTES_MAX);
++	return out_size_bytes(out_at + TAG_BYTES_MAX, bytes_left);
++}
++
++static int out_tail(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	const uint8_t *const out,
++	const uint8_t *const nr0,
++	const uint8_t *const in_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t nr_mask = mask(nr_log2);
++	const uint_fast32_t r_log2 = TAG_BITS_MAX - (off_log2 + nr_log2);
++	const uint_fast32_t nr_bytes_now = u_32(in_end - nr0);
++	if (encoded_bytes_min(nr_log2, nr_bytes_now) > u_32(out_end - out_at))
++		return LZ4K_STATUS_INCOMPRESSIBLE;
++	if (nr_bytes_now < nr_mask) {
++		/* caller guarantees at least one nr-byte */
++		uint_fast32_t utag = (nr_bytes_now << (off_log2 + r_log2));
++		m_copy(out_at, &utag, TAG_BYTES_MAX);
++		out_at += TAG_BYTES_MAX;
++	} else { /* nr_bytes_now>=nr_mask */
++		uint_fast32_t bytes_left = nr_bytes_now - nr_mask;
++		uint_fast32_t utag = (nr_mask << (off_log2 + r_log2));
++		out_at = out_utag_then_bytes_left(out_at, utag, bytes_left);
++	} /* if (nr_bytes_now<nr_mask) */
++	m_copy(out_at, nr0, nr_bytes_now);
++	return (int)(out_at + nr_bytes_now - out);
++}
++
++inline static int out_tail2(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	const uint8_t *const out,
++	const uint8_t *const r,
++	const uint8_t *const in_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	return r == in_end ? (int)(out_at - out) :
++		out_tail(out_at, out_end, out, r, in_end,
++			 nr_log2, off_log2);
++}
++
++int crystal_lz4kd_out_tail(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	const uint8_t *const out,
++	const uint8_t *const nr0,
++	const uint8_t *const in_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	return out_tail(out_at, out_end, out, nr0, in_end,
++			nr_log2, off_log2);
++}
++
++static uint8_t *out_non_repeat(
++	uint8_t *out_at,
++	uint_fast32_t utag,
++	const uint8_t *const nr0,
++	const uint8_t *const r,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	bool exact_copy)
++{
++	const uint_fast32_t nr_bytes_max = u_32(r - nr0);
++	const uint_fast32_t nr_mask = mask(nr_log2),
++		r_log2 = TAG_BITS_MAX - (off_log2 + nr_log2);
++	if (likely(nr_bytes_max < nr_mask)) {
++		utag |= (nr_bytes_max << (off_log2 + r_log2));
++		m_copy(out_at, &utag, TAG_BYTES_MAX);
++		out_at += TAG_BYTES_MAX;
++	} else { /* nr_bytes_max >= nr_mask */
++		uint_fast32_t bytes_left = nr_bytes_max - nr_mask;
++		utag |= (nr_mask << (off_log2 + r_log2));
++		out_at = out_utag_then_bytes_left(out_at, utag, bytes_left);
++	} /* if (nr_bytes_max<nr_mask) */
++	if (exact_copy)
++		m_copy(out_at, nr0, nr_bytes_max);
++	else
++		copy_x_while_total(out_at, nr0, nr_bytes_max, NR_COPY_MIN);
++	out_at += nr_bytes_max;
++	return out_at;
++}
++
++inline static uint8_t *out_r_bytes_left(
++	uint8_t *out_at,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t r_mask = mask(TAG_BITS_MAX - (off_log2 + nr_log2));
++	return likely(r_bytes_max - REPEAT_MIN < r_mask) ?
++		out_at : out_size_bytes(out_at, r_bytes_max - REPEAT_MIN - r_mask);
++}
++
++static uint8_t *out_repeat(
++	uint8_t *out_at,
++	uint_fast32_t utag,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t r_mask = mask(TAG_BITS_MAX - (off_log2 + nr_log2));
++	if (likely(r_bytes_max - REPEAT_MIN < r_mask)) {
++		utag |= ((r_bytes_max - REPEAT_MIN) << off_log2);
++		m_copy(out_at, &utag, TAG_BYTES_MAX);
++		out_at += TAG_BYTES_MAX;
++	} else {
++		uint_fast32_t bytes_left = r_bytes_max - REPEAT_MIN - r_mask;
++		utag |= (r_mask << off_log2);
++		out_at = out_utag_then_bytes_left(out_at, utag, bytes_left);
++	}
++	return out_at; /* SUCCESS: continue compression */
++}
++
++inline static uint8_t *out_tuple(
++	uint8_t *out_at,
++	uint_fast32_t utag,
++	const uint8_t *const nr0,
++	const uint8_t *const r,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	bool exact_copy)
++{
++	update_utag(r_bytes_max, &utag, nr_log2, off_log2);
++	out_at = out_non_repeat(out_at, utag, nr0, r, nr_log2,
++			off_log2, exact_copy);
++	return out_r_bytes_left(out_at, r_bytes_max, nr_log2, off_log2);
++}
++
++uint8_t *crystal_lz4kd_out_tuple(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	uint_fast32_t utag,
++	const uint8_t *const nr0,
++	const uint8_t *const r,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	bool check_out)
++{
++	if (check_out) {
++		const uint_fast32_t nr_bytes_max = u_32(r - nr0);
++		const uint_fast32_t nr_mask = mask(nr_log2);
++		const uint_fast32_t r_mask =
++			mask(TAG_BITS_MAX - (off_log2 + nr_log2));
++		uint_fast32_t encoded_size = TAG_BYTES_MAX + nr_bytes_max;
++
++		if (nr_bytes_max >= nr_mask)
++			encoded_size +=
++				(nr_bytes_max - nr_mask) / BYTE_MAX + 1;
++		if (r_bytes_max - REPEAT_MIN >= r_mask)
++			encoded_size += (r_bytes_max - REPEAT_MIN - r_mask) /
++				BYTE_MAX + 1;
++		if (encoded_size > u_32(out_end - out_at))
++			return NULL;
++	}
++
++	return out_tuple(out_at, utag, nr0, r, r_bytes_max,
++			nr_log2, off_log2, check_out);
++}
++
++#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
++static bool crystal_lz4kd_simd_begin(struct crystal_lz4kd_simd *simd)
++{
++	if (!simd->active) {
++		if (!may_use_simd())
++			return false;
++		kernel_neon_begin();
++		simd->active = true;
++	}
++	return true;
++}
++#endif
++
++void crystal_lz4kd_simd_finish(struct crystal_lz4kd_simd *simd)
++{
++#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
++	if (simd->active) {
++		kernel_neon_end();
++		simd->active = false;
++	}
++#else
++	(void)simd;
++#endif
++}
++
++static const uint8_t *repeat_end(
++	const uint8_t *q,
++	const uint8_t *r,
++	const uint8_t *const in_end_safe,
++	const uint8_t *const in_end,
++	struct crystal_lz4kd_simd *simd)
++{
++	unsigned int warmup = 128 / sizeof(uint64_t);
++
++	(void)simd;
++	q += REPEAT_MIN;
++	r += REPEAT_MIN;
++	/* caller guarantees r+12<=in_end */
++	do {
++		const uint64_t x = read8_at(q) ^ read8_at(r);
++		if (x) {
++			const uint16_t ctz = (uint16_t)__builtin_ctzl(x);
++			return r + (ctz >> BYTE_BITS_LOG2);
++		}
++		/* some bytes differ: count of trailing 0-bits/bytes */
++		q += sizeof(uint64_t);
++		r += sizeof(uint64_t);
++	} while (--warmup && likely(r <= in_end_safe));
++
++#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
++	if (!warmup && in_end - r >= 128 &&
++	    crystal_lz4kd_simd_begin(simd))
++		return crystal_lz4kd_repeat_end_neon(q, r, in_end);
++#endif
++
++	while (likely(r <= in_end_safe)) {
++		const u64 x = read8_at(q) ^ read8_at(r);
++
++		if (x)
++			return r + (__builtin_ctzl(x) >> BYTE_BITS_LOG2);
++		q += sizeof(uint64_t);
++		r += sizeof(uint64_t);
++	}
++	while (r < in_end) {
++		if (*q != *r) return r;
++		++q;
++		++r;
++	}
++	return r;
++}
++
++const uint8_t *crystal_lz4kd_repeat_end(
++	const uint8_t *q,
++	const uint8_t *r,
++	const uint8_t *const in_end_safe,
++	const uint8_t *const in_end,
++	struct crystal_lz4kd_simd *simd)
++{
++	return repeat_end(q, r, in_end_safe, in_end, simd);
++}
++
++/* CR increase order: +STEP, have OFFSETS, use _5b(most impact) */
++/* *_6b to compete with LZ4 */
++inline static uint_fast32_t hash(const uint8_t *r)
++{
++	return hash64_5b(r, HT_LOG2);
++}
++
++/*
++ * Proof that 'r' increments are safe-NO pointer overflows are possible:
++ *
++ * While using STEP_LOG2=5, step_start=1<<STEP_LOG2 == 32 we increment s
++ * 32 times by 1, 32 times by 2, 32 times by 3, and so on:
++ * 32*1+32*2+32*3+...+32*31 == 32*SUM(1..31) == 32*((1+31)*15+16).
++ * So, we can safely increment s by at most 31 for input block size <=
++ * 1<<13 < 15872.
++ *
++ * More precisely, STEP_LIMIT == x for any input block  calculated as follows:
++ * 1<<off_log2 >= (1<<STEP_LOG2)*((x+1)(x-1)/2+x/2) ==>
++ * 1<<(off_log2-STEP_LOG2+1) >= x^2+x-1 ==>
++ * x^2+x-1-1<<(off_log2-STEP_LOG2+1) == 0, which is solved by standard
++ * method.
++ * To avoid overhead here conservative approximate value of x is calculated
++ * as average of two nearest square roots, see STEP_LIMIT above.
++ */
++
++static int encode_any(
++	uint16_t *const ht,
++	const uint8_t *const in0,
++	const uint8_t *const in_end,
++	uint8_t *const out,
++	uint8_t *const out_end,
++	struct crystal_lz4kd_simd *simd)
++{
++	enum {
++		NR_LOG2 = NR_4KB_LOG2,
++		OFF_LOG2 = BLOCK_4KB_LOG2
++	};
++	const uint8_t *const in_end_safe = in_end - NR_COPY_MIN;
++	const uint8_t *r = in0;
++	const uint8_t *nr0 = r++;
++	uint8_t *out_at = out + 1; /* +1 for header */
++	for (; ; nr0 = r) {
++		const uint8_t *q = NULL;
++		uint_fast32_t step = 1 << STEP_LOG2;
++		uint_fast32_t utag = 0;
++		const uint8_t *r_end = NULL;
++		uint_fast32_t r_bytes_max = 0;
++		while (true) {
++			if (equal4(q = hashed(in0, ht, hash(r), r), r))
++				break;
++			++r;
++			if (equal4(q = hashed(in0, ht, hash(r), r), r))
++				break;
++			if (unlikely((r += (++step >> STEP_LOG2)) > in_end_safe))
++				return out_tail(out_at, out_end, out, nr0, in_end,
++						NR_LOG2, OFF_LOG2);
++		}
++		utag = u_32(r - q);
++		r_end = repeat_end(q, r, in_end_safe, in_end, simd);
++		r_bytes_max = u_32(r_end - r);
++		if (unlikely(nr0 == r))
++			out_at = out_repeat(out_at, utag, r_bytes_max,
++					    NR_LOG2, OFF_LOG2);
++		else
++			out_at = out_tuple(out_at, utag, nr0, r,
++					r_bytes_max, NR_LOG2, OFF_LOG2, false);
++		if (unlikely((r += r_bytes_max) > in_end_safe))
++			return out_tail2(out_at, out_end, out, r, in_end,
++					 NR_LOG2, OFF_LOG2);
++		ht[hash(r - 1)] = (uint16_t)(r - 1 - in0);
++	}
++}
++
++static int crystal_lz4kd_encode_fast(
++	void *const state,
++	const uint8_t *const in,
++	uint8_t *const out,
++	const uint_fast32_t in_max,
++	const uint_fast32_t out_max)
++{
++	struct crystal_lz4kd_simd simd = { };
++	int ret;
++
++	ret = encode_any((uint16_t *)state, in, in + in_max, out,
++			 out + out_max, &simd);
++	crystal_lz4kd_simd_finish(&simd);
++	return ret;
++}
++
++int crystal_lz4kd_encode(
++	void *const state,
++	const void *const in,
++	void *out,
++	unsigned in_max,
++	unsigned out_max,
++	unsigned out_limit)
++{
++	const uint64_t io_min = min_u64(in_max, out_max);
++	const uint64_t gain_max = max_u64(GAIN_BYTES_MAX, (io_min >> GAIN_BYTES_LOG2));
++	uintptr_t state_end;
++
++	if (unlikely(state == NULL))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(check_add_overflow((uintptr_t)state,
++			1U << (HT_LOG2 + 1), &state_end)))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(!crystal_lz4kd_valid_range(in, in_max, out, out_max,
++			NR_COPY_MIN, 1U << BLOCK_4KB_LOG2,
++			~0U)))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(out_max <= gain_max))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(!out_limit || out_limit > io_min))
++		out_limit = (unsigned)io_min;
++	m_set(state, 0, 1U << (HT_LOG2 + 1));
++	*((uint8_t*)out) = 0; /* lz4kd header */
++	if (unlikely(nr_encoded_bytes_max(in_max, NR_4KB_LOG2) > out_max))
++		return 0;
++	return crystal_lz4kd_encode_fast(state, (const uint8_t*)in,
++			(uint8_t*)out,
++			in_max, out_limit);
++}
+diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_encode_delta.c b/drivers/block/zram/sddc/lz4kd/lz4kd_encode_delta.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..febff71b44d1ffe9abcd4d19a4912ab244ff1f5a
+--- /dev/null
++++ b/drivers/block/zram/sddc/lz4kd/lz4kd_encode_delta.c
+@@ -0,0 +1,223 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2022. All rights reserved.
++ * Description: LZ4K compression algorithm with delta compression
++ */
++
++#include "lz4kd.h"
++
++#include "lz4kd_private.h"
++#include "lz4kd_encode_private.h"
++
++enum {
++	HT_LOG2 = 13,
++	OFF_LOG2 = 13 /* 13 for 8KB */
++};
++
++static unsigned ht_bytes_max(void)
++{
++	return (1 << HT_LOG2) * sizeof(uint16_t);
++}
++
++inline static uint_fast32_t hashv(const uint64_t v, uint32_t shift)
++{
++	return hash32v(v, shift);
++}
++
++inline static uint_fast32_t hash(const uint8_t *r, uint32_t shift)
++{
++	return hashv(read8_at(r), shift);
++}
++
++static void fill_ht_offsets_s(
++	const uint_fast32_t off0,
++	uint16_t *const ht,
++	uint16_t *const past_offset,
++	uint64_t s)
++{
++	static const uint_fast32_t off1 = 1;
++	static const uint_fast32_t off2 = 2;
++	static const uint_fast32_t off3 = 3;
++	uint_fast32_t h0 = hashv(s,                       HT_LOG2);
++	uint_fast32_t h1 = hashv(s >> (off1 * BYTE_BITS), HT_LOG2);
++	uint_fast32_t h2 = hashv(s >> (off2 * BYTE_BITS), HT_LOG2);
++	uint_fast32_t h3 = hashv(s >> (off3 * BYTE_BITS), HT_LOG2);
++	past_offset[off0 + 0] = ht[h0];
++	ht[h0] = (uint16_t)(off0 + 0);
++	past_offset[off0 + off1] = ht[h1];
++	ht[h1] = (uint16_t)(off0 + off1);
++	past_offset[off0 + off2] = ht[h2];
++	ht[h2] = (uint16_t)(off0 + off2);
++	past_offset[off0 + off3] = ht[h3];
++	ht[h3] = (uint16_t)(off0 + off3);
++}
++
++static void update_hash_table(
++	uint16_t *const ht,
++	const uint8_t *const in1,
++	const uint8_t *const in_end)
++{
++	static const uint64_t read_bytes = 8;
++	uint64_t a = 0;
++	const uint8_t *const in0 = in1 - 1;
++	const uint8_t *r = in1;
++	uint16_t *const past_offset = ht + (1 << HT_LOG2);
++	m_set(ht, 0, ht_bytes_max());
++	past_offset[0] = 0; /* stopper in encode_any2() */
++	while (likely(r + read_bytes <= in_end)) {
++		a = read8_at(r);
++		fill_ht_offsets_s((uint16_t)(r - in0), ht, past_offset, a);
++		r += REPEAT_MIN;
++	}
++	for (; likely(r < in_end); ++r) { /* here in_end=start of the ref block */
++		uint_fast32_t off0 = (uint16_t)(r - in0);
++		uint_fast32_t h = hash(r, HT_LOG2);
++		past_offset[off0] = ht[h];
++		ht[h] = (uint16_t)(off0);
++	}
++}
++
++static void hash_repeat_tail(
++	uint16_t *const ht,
++	uint16_t *const past_offset,
++	const uint8_t *const in0,
++	const uint8_t *const r)
++{
++	const uint8_t *s = r - 1 - 1 - 1;
++	uint_fast32_t h = hash(s, HT_LOG2);
++	past_offset[s - in0] = ht[h];
++	ht[h] = (uint16_t)(s - in0);
++	++s;
++	h = hash(s, HT_LOG2);
++	past_offset[s - in0] = ht[h];
++	ht[h] = (uint16_t)(s - in0);
++	++s;
++	h = hash(s, HT_LOG2);
++	past_offset[s - in0] = ht[h];
++	ht[h] = (uint16_t)(s - in0);
++}
++
++enum {
++	STEP_LOG2 = 5, /* increase for better CR */
++	Q_MAX = 4, /* 2 for "dump" benchmark: increase for better CR */
++	MATCH_MAX = 160
++};
++
++static int encode_any2(
++	uint16_t *const ht,
++	const uint8_t *const in1,
++	const uint8_t *const in,
++	const uint8_t *const in_end,
++	uint8_t *const out,
++	uint8_t *const out_end, /* ==out_limit for !check_out */
++	const uint_fast32_t nr_log2,
++	const bool check_out,
++	struct crystal_lz4kd_simd *simd)
++{
++	uint8_t *out_at = out + 1; /* +1 for header */
++	const uint8_t *const in_end_safe = in_end - NR_COPY_MIN;
++	const uint8_t *const in0 = in1 - 1;
++	const uint8_t *r = in;
++	const uint8_t *nr0 = in;
++	uint_fast32_t r_bytes_max = 0;
++	uint16_t *const past_offset = ht + (1 << HT_LOG2);
++	update_hash_table(ht, in1, in1 + (in - in1));
++	while (true) {
++		uint_fast32_t off0 = 0;
++		uint_fast32_t utag = 0;
++		const uint8_t *q = NULL;
++		const uint8_t *r_end = NULL;
++		const uint8_t *s = r;
++		uint_fast32_t step = 1 << STEP_LOG2;
++		while (true) {
++			uint64_t sv = read8_at(s);
++			uint_fast32_t h = hashv(sv, HT_LOG2);
++			off0 = past_offset[s - in0] = ht[h];
++			ht[h] = (uint16_t)(s - in0);
++			for (; off0 && !equal4pv((q = in0 + off0), sv); off0 = past_offset[off0]);
++			if (off0 != 0)
++				break; /* repeat found */
++			if (unlikely((s += (++step >> STEP_LOG2)) > in_end_safe))
++				return crystal_lz4kd_out_tail(out_at, out_end, out, nr0,
++					 in_end, nr_log2, OFF_LOG2);
++		} /* for */
++		utag = (uint_fast32_t)(s - q);
++		r_end = crystal_lz4kd_repeat_end(q, s, in_end_safe, in_end, simd);
++		r_bytes_max = (uint_fast32_t)(r_end - (r = repeat_start(q, s, nr0, in1)));
++		if (s + r_bytes_max >= in_end) /* see the bottom of while() below */
++			goto REPEAT_DONE; /* match_max(q, s, r_bytes_max + 1) below */
++		step = Q_MAX - 1;
++		while ((off0 = past_offset[off0]) && (q >= in || step > 0)) {
++			const uint8_t *r_start = NULL;
++			--step;
++			if (!match_max((q = in0 + off0), s, r_bytes_max + 1))
++				continue;
++			r_end = crystal_lz4kd_repeat_end(q, s, in_end_safe,
++						   in_end, simd);
++			r_start = repeat_start(q, s, nr0, in1);
++			if (r_bytes_max > (uint_fast32_t)(r_end - r_start))
++				continue;
++			r_bytes_max = (uint_fast32_t)(r_end - r_start);
++			r = r_start;
++			utag = (uint_fast32_t)(s - q);
++			if (s + r_bytes_max >= in_end ||
++			    (q < in && r_bytes_max >= MATCH_MAX))
++				goto REPEAT_DONE;
++		}
++REPEAT_DONE:
++		out_at = crystal_lz4kd_out_tuple(out_at, out_end, utag, nr0, r,
++				r_bytes_max, nr_log2, OFF_LOG2, check_out);
++		if (unlikely(check_out && out_at == NULL))
++			return LZ4K_STATUS_WRITE_ERROR;
++		if (unlikely((r += r_bytes_max) > in_end_safe))
++			return r == in_end ? (int)(out_at - out) :
++				crystal_lz4kd_out_tail(out_at, out_end, out, r,
++					in_end,
++					nr_log2, OFF_LOG2);
++		hash_repeat_tail(ht, past_offset, in0, r);
++		nr0 = r;
++	} /* for */
++}
++
++int crystal_lz4kd_encode_delta(
++	void *const state,
++	const void *const in0,
++	const void *const in,
++	void *out,
++	unsigned in_max,
++	unsigned out_max,
++	unsigned out_limit)
++{
++	const unsigned io_min = in_max < out_max ? in_max : out_max;
++	struct crystal_lz4kd_simd simd = { };
++	uintptr_t in0_addr = (uintptr_t)in0;
++	uintptr_t in_addr = (uintptr_t)in;
++	uintptr_t state_end;
++	int ret;
++
++	if (unlikely(state == NULL))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(check_add_overflow((uintptr_t)state,
++			crystal_lz4kd_encode_state_bytes_min(), &state_end)))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(!crystal_lz4kd_valid_range(in, in_max, out, out_max,
++			NR_COPY_MIN, 1U << BLOCK_4KB_LOG2,
++			~0U)))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(!in0 || in0_addr >= in_addr))
++		return LZ4K_STATUS_FAILED;
++	if (unlikely(in_addr - in0_addr >
++		     (1U << BLOCK_8KB_LOG2) - in_max))
++		return LZ4K_STATUS_FAILED;
++	if (!out_limit || out_limit > io_min)
++		out_limit = io_min;
++	*((uint8_t*)out) = 0; /* header */
++	if (unlikely(nr_encoded_bytes_max(in_max, NR_8KB_LOG2) > out_max))
++		ret = encode_any2(state, in0, in, (const u8 *)in + in_max,
++			out, (u8 *)out + out_max, NR_8KB_LOG2, true, &simd);
++	else
++		ret = encode_any2(state, in0, in, (const u8 *)in + in_max,
++			out, (u8 *)out + out_limit, NR_8KB_LOG2, false, &simd);
++	crystal_lz4kd_simd_finish(&simd);
++	return ret;
++}
+diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_encode_private.h b/drivers/block/zram/sddc/lz4kd/lz4kd_encode_private.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f3af025af2f2f1f2e814af645496240529c857e
+--- /dev/null
++++ b/drivers/block/zram/sddc/lz4kd/lz4kd_encode_private.h
+@@ -0,0 +1,110 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2022. All rights reserved.
++ * Description: LZ4K compression algorithm with delta compression
++ */
++
++#ifndef _LZ4KD_ENCODE_PRIVATE_H
++#define _LZ4KD_ENCODE_PRIVATE_H
++
++#include "lz4kd_private.h"
++
++enum {
++	GAIN_BYTES_LOG2 = 6,
++	GAIN_BYTES_MAX = 1 << GAIN_BYTES_LOG2,
++	NR_COPY_LOG2 = 4,
++	NR_COPY_MIN = 1 << NR_COPY_LOG2
++};
++
++struct crystal_lz4kd_simd {
++	bool active;
++};
++
++inline static uint32_t u_32(int64_t i)
++{
++	return (uint32_t)i;
++}
++
++/*
++ * Compressed data format (where {} means 0 or more occurrences, [] means
++ * optional)
++ * <24bits tag: (off_log2 rOffset| r_log2 rSize|nr_log2 nrSize)>
++ * {<nrSize byte>}[<nr bytes>]{<rSize byte>}
++ * <rSize byte> and <nrSize byte> sequences are terminated by byte != 255
++ *
++ * <nrSize bytes for whole block>+<1 terminating 0 byte>
++ */
++inline static uint_fast32_t size_bytes_count(uint_fast32_t u)
++{
++	return ((u + BYTE_MAX) >> BYTE_BITS) + 1; /* (u + BYTE_MAX - 1) / BYTE_MAX; */
++}
++
++/* maximum encoded size for non-compressible data if "fast" encoder is used */
++inline static uint_fast32_t nr_encoded_bytes_max(
++	uint_fast32_t nr_max,
++	uint_fast32_t nr_log2)
++{
++	uint_fast32_t r = 1 + TAG_BYTES_MAX + (uint32_t)round_up_to_log2(nr_max, NR_COPY_LOG2);
++	return nr_max < mask(nr_log2) ? r : r + size_bytes_count(nr_max - mask(nr_log2));
++}
++
++inline static const uint8_t *hashed(
++	const uint8_t *const in0,
++	uint16_t *const ht,
++	uint_fast32_t h,
++	const uint8_t *r)
++{
++	const uint8_t *q = in0 + ht[h];
++	ht[h] = (uint16_t)(r - in0);
++	return q;
++}
++
++inline static const uint8_t *repeat_start(
++	const uint8_t *q,
++	const uint8_t *r,
++	const uint8_t *const nr0,
++	const uint8_t *const in0)
++{
++	for (; r > nr0 && likely(q > in0) && unlikely(q[-1] == r[-1]); --q, --r);
++	return r;
++}
++
++static inline bool match_max(
++		const uint8_t *q,
++		const uint8_t *s,
++		const uint_fast32_t r_max)
++{
++	return equal4(q + r_max - REPEAT_MIN, s + r_max - REPEAT_MIN) &&
++		equal4(q, s);
++}
++
++int crystal_lz4kd_out_tail(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	const uint8_t *const out,
++	const uint8_t *const nr0,
++	const uint8_t *const in_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2);
++
++uint8_t *crystal_lz4kd_out_tuple(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	uint_fast32_t utag,
++	const uint8_t *const nr0,
++	const uint8_t *const r,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	bool check_out);
++
++const uint8_t *crystal_lz4kd_repeat_end(
++	const uint8_t *q,
++	const uint8_t *r,
++	const uint8_t *const in_end_safe,
++	const uint8_t *const in_end,
++	struct crystal_lz4kd_simd *simd);
++
++void crystal_lz4kd_simd_finish(struct crystal_lz4kd_simd *simd);
++
++#endif /* _LZ4KD_ENCODE_PRIVATE_H */
+diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_neon.c b/drivers/block/zram/sddc/lz4kd/lz4kd_neon.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..43f56e9a2fd6ca9033a9906a8d3c2d465b9182df
+--- /dev/null
++++ b/drivers/block/zram/sddc/lz4kd/lz4kd_neon.c
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
++
++#include <asm/neon-intrinsics.h>
++
++#include "lz4kd_neon.h"
++
++static inline u64 crystal_lz4kd_read64(const void *src)
++{
++	u64 value;
++
++	__builtin_memcpy(&value, src, sizeof(value));
++	return value;
++}
++
++noinline const u8 *crystal_lz4kd_repeat_end_neon(const u8 *q,
++		const u8 *r, const u8 *end)
++{
++	while (end - r >= 64) {
++		uint8x16_t d0 = veorq_u8(vld1q_u8(q), vld1q_u8(r));
++		uint8x16_t d1 = veorq_u8(vld1q_u8(q + 16),
++				vld1q_u8(r + 16));
++		uint8x16_t d2 = veorq_u8(vld1q_u8(q + 32),
++				vld1q_u8(r + 32));
++		uint8x16_t d3 = veorq_u8(vld1q_u8(q + 48),
++				vld1q_u8(r + 48));
++		uint8x16_t diff = vorrq_u8(vorrq_u8(d0, d1),
++				vorrq_u8(d2, d3));
++
++		if (vmaxvq_u8(diff))
++			break;
++		q += 64;
++		r += 64;
++	}
++
++	while (end - r >= 8) {
++		u64 diff = crystal_lz4kd_read64(q) ^
++				crystal_lz4kd_read64(r);
++
++		if (diff)
++			return r + (__builtin_ctzll(diff) >> 3);
++		q += sizeof(u64);
++		r += sizeof(u64);
++	}
++	while (r < end && *q == *r) {
++		q++;
++		r++;
++	}
++	return r;
++}
+diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_neon.h b/drivers/block/zram/sddc/lz4kd/lz4kd_neon.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..760ac5ca8a13c885bd42c5610b3db900cfc90472
+--- /dev/null
++++ b/drivers/block/zram/sddc/lz4kd/lz4kd_neon.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0 */
++
++#ifndef _LZ4KD_NEON_H
++#define _LZ4KD_NEON_H
++
++#include <linux/types.h>
++
++const u8 *crystal_lz4kd_repeat_end_neon(const u8 *q, const u8 *r,
++					const u8 *end);
++
++#endif /* _LZ4KD_NEON_H */
+diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_private.h b/drivers/block/zram/sddc/lz4kd/lz4kd_private.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c47269a3ebeab5205f96d1f5be490fb5c0eabd5
+--- /dev/null
++++ b/drivers/block/zram/sddc/lz4kd/lz4kd_private.h
+@@ -0,0 +1,188 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2022. All rights reserved.
++ * Description: LZ4K compression algorithm with delta compression
++ */
++
++#ifndef _LZ4KD_PRIVATE_H
++#define _LZ4KD_PRIVATE_H
++
++#include "lz4kd.h"
++#include <linux/overflow.h>
++#include <linux/stddef.h>
++#include <linux/string.h>
++#include <linux/types.h>
++
++typedef uint64_t uint_fast32_t;
++
++static inline bool crystal_lz4kd_valid_range(
++	const void *in, size_t in_max, const void *out, size_t out_max,
++	size_t min_in, size_t max_in, size_t max_out)
++{
++	uintptr_t in_end;
++	uintptr_t out_end;
++
++	if (!in || !out || in_max < min_in || in_max > max_in ||
++	    !out_max || out_max > max_out)
++		return false;
++
++	if (check_add_overflow((uintptr_t)in, in_max, &in_end) ||
++	    check_add_overflow((uintptr_t)out, out_max, &out_end))
++		return false;
++
++	return in_end > (uintptr_t)in && out_end > (uintptr_t)out;
++}
++
++enum {
++	BYTE_BITS = 8UL,
++	WORD_BITS = 32U,
++	DWORD_BITS = 64UL,
++	BYTE_BITS_LOG2 = 3,
++	BYTE_MAX = 255U,
++	REPEAT_MIN = 4,
++	TAG_BYTES_MAX = 3,
++	TAG_BITS_MAX  = TAG_BYTES_MAX * 8,
++	BLOCK_4KB_LOG2  = 12,
++	BLOCK_8KB_LOG2  = 13,
++	NR_8KB_LOG2 = 5, /* for encoded_bytes_max */
++	NR_4KB_LOG2 = 6,
++	PATTERN_BYTES_MAX = 8 /* 1 bytes for header, 8 bytes for pattern */
++};
++
++inline static uint32_t mask(uint_fast32_t log2)
++{
++	return (1U << log2) - 1U;
++}
++
++inline static uint64_t max_u64(uint64_t a, uint64_t b)
++{
++	return a > b ? a : b;
++}
++
++inline static uint64_t min_u64(uint64_t a, uint64_t b)
++{
++	return a < b ? a : b;
++}
++
++inline static void m_copy(void *dst, const void *src, size_t total)
++{
++	(void)__builtin_memcpy(dst, src, total);
++}
++
++inline static void m_set(void *dst, uint8_t value, size_t total)
++{
++	(void)__builtin_memset(dst, value, total);
++}
++
++inline static uint64_t round_up_to_log2(uint64_t u, uint8_t log2)
++{
++	const uint64_t round_mask = (1ULL << log2) - 1;
++
++	return (u + round_mask) & ~round_mask;
++}
++
++inline static uint32_t read4_at(const void *p)
++{
++	uint32_t result;
++	m_copy(&result, p, sizeof(result));
++	return result;
++}
++
++inline static uint64_t read8_at(const void *p)
++{
++	uint64_t result;
++	m_copy(&result, p, sizeof(result));
++	return result;
++}
++
++inline static bool equal4(const uint8_t *const q, const uint8_t *const r)
++{
++	return read4_at(q) == read4_at(r);
++}
++
++inline static bool equal4pv(const uint8_t *const q, const uint64_t rv)
++{
++	return read4_at(q) == (uint32_t)rv;
++}
++
++inline static uint_fast32_t hash32v(const uint64_t r, uint32_t shift)
++{
++	const uint32_t hash32_factor = 2654435761U;
++	return ((uint32_t)r * hash32_factor) >> (WORD_BITS - shift);
++}
++
++inline static uint_fast32_t hash64v_5b(const uint64_t r, uint32_t shift)
++{
++	const uint64_t m = 889523592379ULL;
++	const uint64_t up_shift = 24;
++	return (uint32_t)(((r << up_shift) * m) >> (DWORD_BITS - shift));
++}
++
++inline static uint_fast32_t hash64_5b(const uint8_t *r, uint32_t shift)
++{
++	return hash64v_5b(read8_at(r), shift);
++}
++
++inline static void while_lt_copy_x(
++	uint8_t *dst,
++	const uint8_t *src,
++	const uint8_t *dst_end,
++	const size_t copy_min)
++{
++	for (; dst < dst_end; dst += copy_min, src += copy_min)
++		m_copy(dst, src, copy_min);
++}
++
++inline static void copy_x_while_lt(
++	uint8_t *dst,
++	const uint8_t *src,
++	const uint8_t *dst_end,
++	const size_t copy_min)
++{
++	m_copy(dst, src, copy_min);
++	while (dst + copy_min < dst_end)
++		m_copy(dst += copy_min, src += copy_min, copy_min);
++}
++
++inline static void copy_x_while_total(
++	uint8_t *dst,
++	const uint8_t *src,
++	size_t total,
++	const size_t copy_min)
++{
++	m_copy(dst, src, copy_min);
++	for (; total > copy_min; total -= copy_min)
++		m_copy(dst += copy_min, src += copy_min, copy_min);
++}
++
++inline static void copy_2x(
++	uint8_t *dst,
++	const uint8_t *src,
++	const size_t copy_min)
++{
++	m_copy(dst, src, copy_min);
++	m_copy(dst + copy_min, src + copy_min, copy_min);
++}
++
++inline static void copy_2x_as_x2_while_lt(
++	uint8_t *dst,
++	const uint8_t *src,
++	const uint8_t *dst_end,
++	const size_t copy_min)
++{
++	copy_2x(dst, src, copy_min);
++	while (dst + (copy_min << 1) < dst_end)
++		copy_2x(dst += (copy_min << 1), src += (copy_min << 1), copy_min);
++}
++
++inline static void while_lt_copy_2x_as_x2(
++	uint8_t *dst,
++	const uint8_t *src,
++	const uint8_t *dst_end,
++	const size_t copy_min)
++{
++	for (; dst < dst_end; dst += (copy_min << 1), src += (copy_min << 1))
++		copy_2x(dst, src, copy_min);
++}
++
++#endif /* _LZ4KD_PRIVATE_H */
+diff --git a/drivers/block/zram/sddc/zram_sddc.c b/drivers/block/zram/sddc/zram_sddc.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a79164169bb50
+--- /dev/null
++++ b/drivers/block/zram/sddc/zram_sddc.c
+@@ -0,0 +1,3102 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/atomic.h>
++#include <linux/bitmap.h>
++#include <linux/blkdev.h>
++#include <linux/byteorder/generic.h>
++#include <linux/highmem.h>
++#include <linux/idr.h>
++#include <linux/jhash.h>
++#include <linux/mm.h>
++#include <linux/refcount.h>
++#include <linux/slab.h>
++#include <linux/sort.h>
++#include <linux/spinlock.h>
++#include <linux/vmalloc.h>
++#include <linux/wait.h>
++#include <linux/workqueue.h>
++#include <linux/xarray.h>
++#include <linux/zsmalloc.h>
++#include <linux/bit_spinlock.h>
++
++#if IS_ENABLED(CONFIG_ZRAM_SDDC_KUNIT_TEST)
++#include <kunit/test.h>
++#endif
++
++#include "../zram_drv.h"
++#include "zram_sddc.h"
++
++#define ZRAM_SDDC_HASH_BITS		16
++#define ZRAM_SDDC_HASH_BUCKETS	(1U << ZRAM_SDDC_HASH_BITS)
++#define ZRAM_SDDC_BUCKET_WAYS	8
++#define ZRAM_SDDC_SAMPLE_SIZE	16
++#define ZRAM_SDDC_INDEX_MIN_SIZE	256
++#define ZRAM_SDDC_OBSERVE_WORKS	2
++#define ZRAM_SDDC_MAX_SLOTS	(UINT_MAX - (BITS_PER_LONG - 1))
++#define ZRAM_SDDC_HASH_SEED		0x1e35a7bdU
++#define ZRAM_SDDC_DELTA_GAIN_MIN	8
++#define ZRAM_SDDC_DELTA_MIN_SIZE	(PAGE_SIZE / 8)
++#define ZRAM_SDDC_SIMILARITY_MIN	16
++#define ZRAM_SDDC_DELTA_MAGIC	0x43444453U
++#define ZRAM_SDDC_DELTA_VERSION	1
++#define ZRAM_SDDC_OBSERVE_BUDGET	64
++
++enum zram_sddc_sample_kind {
++	ZRAM_SDDC_SAMPLE_HEAD = BIT(0),
++	ZRAM_SDDC_SAMPLE_TAIL = BIT(1),
++};
++
++struct zram_sddc_slot_state {
++	struct zram_sddc_cookie ref;
++	u32 accounted_size;
++	u32 saved_size;
++	u8 kind;
++};
++
++struct zram_sddc_delta_header {
++	__le32 magic;
++	__le16 version;
++	__le16 header_size;
++	__le32 ref_id;
++	__le32 ref_generation;
++	__le32 ref_size;
++	__le32 target_size;
++};
++
++struct zram_sddc_workspace {
++	void *ordinary;
++	void *ref_data;
++	void *wire;
++};
++
++struct zram_sddc_candidate {
++	u32 index;
++	u8 sample_kind;
++};
++
++struct zram_sddc_bucket {
++	/* Zero is empty; non-zero stores slot index + 1.  Keeping the index
++	 * compact leaves room for the Huawei-sized candidate tables without
++	 * giving up the generation checks in the managed state. */
++	u32 cells[ZRAM_SDDC_BUCKET_WAYS];
++	u8 next;
++};
++
++struct zram_sddc_ranked_candidate {
++	struct zram_sddc_candidate candidate;
++	u32 match_bytes;
++	u32 ref_count;
++	u32 source_size;
++};
++
++struct zram_sddc;
++
++/* A second work item lets the drain continue while the first callback is
++ * still returning from the workqueue.
++ */
++struct zram_sddc_observe_work {
++	struct work_struct work;
++	struct zram_sddc *sddc;
++	unsigned int id;
++};
++
++struct zram_sddc_stats {
++	atomic64_t queued;
++	atomic64_t coalesced;
++	atomic64_t dropped;
++	atomic64_t ineligible;
++	atomic64_t shutdown_discarded;
++	atomic64_t worker_runs;
++	atomic64_t observed;
++	atomic64_t stale;
++	atomic64_t indexed;
++	atomic64_t refs;
++	atomic64_t ref_bytes;
++	atomic64_t aliases;
++	atomic64_t deltas;
++	atomic64_t delta_bytes;
++	atomic64_t alias_attempts;
++	atomic64_t alias_hits;
++	atomic64_t delta_attempts;
++	atomic64_t delta_hits;
++	atomic64_t delta_matches;
++	atomic64_t delta_small_rejects;
++	atomic64_t delta_no_gain;
++	atomic64_t delta_match_bytes_max;
++	atomic64_t saved_bytes;
++	atomic64_t saved_bytes_total;
++	atomic64_t conversion_failures;
++	atomic64_t decode_failures;
++	atomic64_t flatten_failures;
++	atomic64_t limit_rejects;
++	atomic64_t pending_max;
++};
++
++struct zram_sddc_ref {
++	struct work_struct free_work;
++	struct zram_sddc *sddc;
++	refcount_t refs;
++	struct zram_sddc_cookie cookie;
++	unsigned long handle;
++		u32 size;
++	u8 prio;
++};
++
++struct zram_sddc {
++	struct zram *zram;
++	u64 *mutation_seq;
++	struct xarray slot_states;
++	struct zram_sddc_bucket *exact_index;
++	struct zram_sddc_bucket *sample_index;
++	struct workqueue_struct *workqueue;
++	struct workqueue_struct *free_workqueue;
++	struct zram_sddc_observe_work observe_work[ZRAM_SDDC_OBSERVE_WORKS];
++	struct zram_sddc_workspace *observe_workspace;
++	unsigned long *observe_pending;
++	unsigned long nr_slots;
++	spinlock_t state_lock;
++	spinlock_t index_lock;
++	spinlock_t active_lock;
++	struct ida ref_ids;
++	struct xarray refs;
++	atomic_t next_generation;
++	atomic_t active_ops;
++	wait_queue_head_t active_wait;
++	unsigned long observe_cursor;
++	unsigned int observe_work_cursor;
++	unsigned int pending;
++	bool observe_worker_active;
++	bool stopping;
++	struct zram_sddc_stats stats;
++};
++
++struct zram_sddc_source {
++	struct zram_sddc_job_key key;
++	struct zram_sddc_cookie cookie;
++	struct zram_sddc_ref *ref;
++	bool ordinary;
++};
++
++static size_t zram_sddc_obj_size(struct zram *zram, u32 index)
++{
++	return zram->table[index].flags & (BIT(ZRAM_FLAG_SHIFT) - 1);
++}
++
++static u32 zram_sddc_priority(struct zram *zram, u32 index)
++{
++	u32 prio = zram->table[index].flags >> ZRAM_COMP_PRIORITY_BIT1;
++
++	return prio & ZRAM_COMP_PRIORITY_MASK;
++}
++
++static void zram_sddc_set_obj_size(struct zram *zram, u32 index,
++		size_t size)
++{
++	unsigned long flags = zram->table[index].flags >> ZRAM_FLAG_SHIFT;
++
++	zram->table[index].flags = (flags << ZRAM_FLAG_SHIFT) | size;
++}
++
++static bool zram_sddc_test_flag(struct zram *zram, u32 index,
++		enum zram_pageflags flag)
++{
++	return zram->table[index].flags & BIT(flag);
++}
++
++static void zram_sddc_clear_storage_flags(struct zram *zram, u32 index)
++{
++	if (zram_sddc_test_flag(zram, index, ZRAM_HUGE)) {
++		zram->table[index].flags &= ~BIT(ZRAM_HUGE);
++		atomic64_dec(&zram->stats.huge_pages);
++	}
++	if (zram_sddc_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
++		zram->table[index].flags &= ~BIT(ZRAM_INCOMPRESSIBLE);
++}
++
++static void zram_sddc_slot_lock(struct zram *zram, u32 index)
++	__acquires(bitlock)
++{
++	bit_spin_lock(ZRAM_LOCK, &zram->table[index].flags);
++}
++
++static void zram_sddc_slot_unlock(struct zram *zram, u32 index)
++	__releases(bitlock)
++{
++	bit_spin_unlock(ZRAM_LOCK, &zram->table[index].flags);
++}
++
++static bool zram_sddc_memory_limit_ok(struct zram *zram)
++{
++	unsigned long pages = zs_get_total_pages(zram->mem_pool);
++	long old = atomic_long_read(&zram->stats.max_used_pages);
++
++	while (pages > old) {
++		long previous = atomic_long_cmpxchg(&zram->stats.max_used_pages,
++				old, pages);
++
++		if (previous == old)
++			break;
++		old = previous;
++	}
++	return !zram->limit_pages || pages <= zram->limit_pages;
++}
++
++static bool zram_sddc_cookie_equal(const struct zram_sddc_cookie *a,
++		const struct zram_sddc_cookie *b)
++{
++	return a->id == b->id && a->generation == b->generation;
++}
++
++/* The caller holds the corresponding zram slot lock. */
++static struct zram_sddc_slot_state *
++zram_sddc_state_load_locked(struct zram_sddc *sddc, u32 index)
++{
++	struct zram_sddc_slot_state *state;
++
++	state = xa_load(&sddc->slot_states, index);
++	if (!state || xa_is_err(state) || xa_is_zero(state))
++		return NULL;
++	return state;
++}
++
++/* Unlike xa_load(), this preserves XA_ZERO_ENTRY so a slot free cannot
++ * accidentally consume a reservation belonging to an in-flight conversion. */
++static void *zram_sddc_state_load_raw(struct zram_sddc *sddc,
++		u32 index)
++{
++	XA_STATE(xas, &sddc->slot_states, index);
++	unsigned long flags;
++	void *entry;
++
++	xa_lock_irqsave(&sddc->slot_states, flags);
++	entry = xas_load(&xas);
++	xa_unlock_irqrestore(&sddc->slot_states, flags);
++	return entry;
++}
++
++/*
++ * Release an XArray reservation without treating a concurrent state as ours.
++ * The normal xa_* API hides XA_ZERO_ENTRY, so use the advanced API while
++ * holding the array lock and make the test-and-release one operation.
++ */
++static bool zram_sddc_xa_release_reservation(struct xarray *xa,
++		unsigned long index)
++{
++	XA_STATE(xas, xa, index);
++	unsigned long flags;
++	bool released = false;
++
++	xa_lock_irqsave(xa, flags);
++	if (xas_load(&xas) == XA_ZERO_ENTRY) {
++		xas_store(&xas, NULL);
++		released = !xas_error(&xas);
++	}
++	xa_unlock_irqrestore(xa, flags);
++
++	return released;
++}
++
++/* Remove an XArray entry only if it is still the value observed by the
++ * caller.  Slot locks do not cover the reservation abort path, so a plain
++ * xa_erase() after a raw load could otherwise remove a newer state owner. */
++static void *zram_sddc_xa_erase_if(struct xarray *xa,
++		unsigned long index, void *expected)
++{
++	XA_STATE(xas, xa, index);
++	unsigned long flags;
++	void *removed = NULL;
++
++	if (!expected)
++		return NULL;
++
++	xa_lock_irqsave(xa, flags);
++	if (xas_load(&xas) == expected) {
++		xas_store(&xas, NULL);
++		if (!xas_error(&xas))
++			removed = expected;
++	}
++	xa_unlock_irqrestore(xa, flags);
++
++	return removed;
++}
++
++static struct zram_sddc_slot_state *
++zram_sddc_state_prepare(struct zram_sddc *sddc, u32 index)
++{
++	struct zram_sddc_slot_state *state;
++	int ret;
++
++	state = kzalloc(sizeof(*state), GFP_NOIO | __GFP_NOWARN);
++	if (!state)
++		return NULL;
++
++	/* xa_insert(NULL) conditionally creates XA_ZERO_ENTRY and reports
++	 * -EBUSY if another state or reservation already owns this slot. */
++	ret = xa_insert(&sddc->slot_states, index, NULL,
++			GFP_NOIO | __GFP_NOWARN);
++	if (ret) {
++		kfree(state);
++		return NULL;
++	}
++
++	return state;
++}
++
++static bool zram_sddc_state_identity_changed(
++		struct zram_sddc *sddc, u32 index, u64 mutation_seq)
++{
++	struct zram *zram = sddc->zram;
++	bool changed;
++
++	if (!zram || !READ_ONCE(zram->table) || index >= sddc->nr_slots)
++		return false;
++
++	zram_sddc_slot_lock(zram, index);
++	changed = sddc->mutation_seq[index] != mutation_seq;
++	zram_sddc_slot_unlock(zram, index);
++	return changed;
++}
++
++static void zram_sddc_state_abort(struct zram_sddc *sddc, u32 index,
++		u64 mutation_seq, struct zram_sddc_slot_state *state)
++{
++	void *entry;
++
++	if (!state)
++		return;
++
++	/* A failed publication leaves the reservation in place.  Do not erase a
++	 * state node (or a newer owner's reservation) if the caller is late. */
++	if (zram_sddc_xa_release_reservation(&sddc->slot_states, index)) {
++		/* A rewrite can observe our reservation and therefore cannot enqueue
++		 * its latest key.  Requeue only when the identity actually changed;
++		 * ordinary conversion rejection must not create a retry loop. */
++		bool identity_changed = zram_sddc_state_identity_changed(sddc,
++				index, mutation_seq);
++
++		kfree(state);
++		if (identity_changed && sddc->workqueue)
++			zram_sddc_requeue_observation(sddc->zram, index);
++		return;
++	}
++
++	entry = zram_sddc_state_load_raw(sddc, index);
++	if (entry == state) {
++		/* The caller must not abort a published value.  Keeping it alive is
++		 * safer than freeing memory still reachable from the XArray. */
++		WARN_ON_ONCE(1);
++		return;
++	}
++	/* A different owner may have won the slot after our reservation was
++	 * removed.  Our private object was never published and can be freed. */
++	if (entry && entry != XA_ZERO_ENTRY)
++		WARN_ON_ONCE(1);
++	kfree(state);
++}
++
++/* A prior xa_insert(NULL) makes this non-allocating under the slot lock. */
++static bool zram_sddc_state_install_locked(struct zram_sddc *sddc,
++		u32 index, struct zram_sddc_slot_state *state)
++{
++	XA_STATE(xas, &sddc->slot_states, index);
++	unsigned long flags;
++	bool installed = false;
++
++	if (WARN_ON_ONCE(!state))
++		return false;
++
++	/* Consume only our reservation; never overwrite a concurrent node. */
++	xa_lock_irqsave(&sddc->slot_states, flags);
++	if (xas_load(&xas) == XA_ZERO_ENTRY) {
++		xas_store(&xas, state);
++		installed = !xas_error(&xas);
++	}
++	xa_unlock_irqrestore(&sddc->slot_states, flags);
++
++	return installed;
++}
++
++static void zram_sddc_mutation_advance_locked(struct zram_sddc *sddc,
++		u32 index)
++{
++	if (!++sddc->mutation_seq[index])
++		sddc->mutation_seq[index]++;
++}
++
++static struct zram_sddc *zram_sddc_manager_get(struct zram *zram)
++{
++	struct zram_sddc *sddc;
++
++	spin_lock(&zram->sddc_lock);
++	sddc = zram->sddc;
++	if (!sddc || READ_ONCE(sddc->stopping))
++		sddc = NULL;
++	else {
++		spin_lock(&sddc->active_lock);
++		atomic_inc(&sddc->active_ops);
++		spin_unlock(&sddc->active_lock);
++	}
++	spin_unlock(&zram->sddc_lock);
++	return sddc;
++}
++
++static void zram_sddc_manager_put(struct zram_sddc *sddc)
++{
++	bool idle;
++
++	/* Keep the final decrement and wakeup inside active_lock.  Teardown
++	 * confirms idle while taking the same lock, so it cannot free @sddc while
++	 * this function is still touching its waitqueue. */
++	spin_lock(&sddc->active_lock);
++	idle = atomic_dec_and_test(&sddc->active_ops);
++	if (idle)
++		wake_up_all(&sddc->active_wait);
++	spin_unlock(&sddc->active_lock);
++}
++
++static void zram_sddc_manager_wait_idle(struct zram_sddc *sddc)
++{
++	for (;;) {
++		wait_event(sddc->active_wait,
++			!atomic_read(&sddc->active_ops));
++
++		/* A waiter may observe zero while the final put still owns
++		 * active_lock and is finishing wake_up_all(). */
++		spin_lock(&sddc->active_lock);
++		if (!atomic_read(&sddc->active_ops)) {
++			spin_unlock(&sddc->active_lock);
++			return;
++		}
++		spin_unlock(&sddc->active_lock);
++	}
++}
++
++static void zram_sddc_atomic64_update_max(atomic64_t *value, s64 candidate)
++{
++	s64 old = atomic64_read(value);
++
++	while (old < candidate) {
++		s64 previous = atomic64_cmpxchg(value, old, candidate);
++
++		if (previous == old)
++			break;
++		old = previous;
++	}
++}
++
++static struct zram_sddc_workspace *
++zram_sddc_workspace_alloc(gfp_t gfp_mask)
++{
++	struct zram_sddc_workspace *workspace;
++
++	workspace = kmalloc(sizeof(*workspace), gfp_mask);
++	if (!workspace)
++		return NULL;
++	workspace->ordinary = kmalloc(PAGE_SIZE, gfp_mask);
++	workspace->ref_data = kmalloc(PAGE_SIZE, gfp_mask);
++	workspace->wire = kmalloc(PAGE_SIZE, gfp_mask);
++	if (workspace->ordinary && workspace->ref_data && workspace->wire)
++		return workspace;
++
++	kfree(workspace->wire);
++	kfree(workspace->ref_data);
++	kfree(workspace->ordinary);
++	kfree(workspace);
++	return NULL;
++}
++
++static void zram_sddc_workspace_free(struct zram_sddc_workspace *workspace)
++{
++	if (!workspace)
++		return;
++	kfree(workspace->wire);
++	kfree(workspace->ref_data);
++	kfree(workspace->ordinary);
++	kfree(workspace);
++}
++
++static void zram_sddc_ref_release(struct zram_sddc_ref *ref)
++{
++	struct zram_sddc *sddc = ref->sddc;
++
++	zs_free(sddc->zram->mem_pool, ref->handle);
++	atomic64_sub(ref->size, &sddc->zram->stats.compr_data_size);
++	ida_free(&sddc->ref_ids, ref->cookie.id);
++	atomic64_dec(&sddc->stats.refs);
++	atomic64_sub(ref->size, &sddc->stats.ref_bytes);
++	kfree(ref);
++}
++
++static void zram_sddc_ref_free_workfn(struct work_struct *work)
++{
++	struct zram_sddc_ref *ref = container_of(work,
++			struct zram_sddc_ref, free_work);
++
++	zram_sddc_ref_release(ref);
++}
++
++static void zram_sddc_ref_queue_free(struct zram_sddc_ref *ref)
++{
++	WARN_ON_ONCE(!queue_work(ref->sddc->free_workqueue, &ref->free_work));
++}
++
++static struct zram_sddc_ref *
++zram_sddc_ref_alloc(struct zram_sddc *sddc)
++{
++	struct zram_sddc_ref *ref;
++	u32 generation;
++	int id;
++	int ret;
++
++	/* Conversion runs from a reclaim-capable workqueue.  Keep allocation
++	 * below the zram reclaim path and treat failure as an ordinary miss. */
++	ref = kzalloc(sizeof(*ref), GFP_NOIO | __GFP_NOWARN);
++	if (!ref)
++		return ERR_PTR(-ENOMEM);
++
++	id = ida_alloc_min(&sddc->ref_ids, 1, GFP_NOIO | __GFP_NOWARN);
++	if (id < 0) {
++		kfree(ref);
++		return ERR_PTR(id);
++	}
++
++	ret = xa_insert(&sddc->refs, id, NULL, GFP_NOIO | __GFP_NOWARN);
++	if (ret) {
++		ida_free(&sddc->ref_ids, id);
++		kfree(ref);
++		return ERR_PTR(ret);
++	}
++
++	generation = (u32)atomic_inc_return(&sddc->next_generation);
++	if (!generation)
++		generation = (u32)atomic_inc_return(&sddc->next_generation);
++
++	INIT_WORK(&ref->free_work, zram_sddc_ref_free_workfn);
++	ref->sddc = sddc;
++	ref->cookie.id = id;
++	ref->cookie.generation = generation;
++	return ref;
++}
++
++static void zram_sddc_ref_abort(struct zram_sddc_ref *ref)
++{
++	struct zram_sddc *sddc;
++
++	if (!ref)
++		return;
++	sddc = ref->sddc;
++	/* Only the allocator's reservation may be released here.  A failed
++	 * publication must never erase a newer entry reusing the same ID. */
++	if (WARN_ON_ONCE(!zram_sddc_xa_release_reservation(&sddc->refs,
++			ref->cookie.id)))
++		return;
++	ida_free(&sddc->ref_ids, ref->cookie.id);
++	kfree(ref);
++}
++
++static bool zram_sddc_ref_publish(struct zram_sddc *sddc,
++		struct zram_sddc_ref *ref)
++{
++	XA_STATE(xas, &sddc->refs, 0);
++	unsigned long flags;
++	bool published = false;
++
++	xas_set(&xas, ref->cookie.id);
++	xa_lock_irqsave(&sddc->refs, flags);
++	if (xas_load(&xas) == XA_ZERO_ENTRY) {
++		xas_store(&xas, ref);
++		published = !xas_error(&xas);
++	}
++	xa_unlock_irqrestore(&sddc->refs, flags);
++	return published;
++}
++
++static struct zram_sddc_ref *
++zram_sddc_ref_pin(struct zram_sddc *sddc,
++		const struct zram_sddc_cookie *cookie)
++{
++	struct zram_sddc_ref *ref;
++	unsigned long flags;
++
++	if (!cookie->id || !cookie->generation)
++		return NULL;
++
++	xa_lock_irqsave(&sddc->refs, flags);
++	ref = xa_load(&sddc->refs, cookie->id);
++	if (!ref || !zram_sddc_cookie_equal(&ref->cookie, cookie) ||
++	    !refcount_inc_not_zero(&ref->refs))
++		ref = NULL;
++	xa_unlock_irqrestore(&sddc->refs, flags);
++	return ref;
++}
++
++static void zram_sddc_ref_put(struct zram_sddc_ref *ref)
++{
++	struct zram_sddc *sddc;
++	unsigned long flags;
++	bool dead = false;
++
++	if (!ref)
++		return;
++	sddc = ref->sddc;
++
++	xa_lock_irqsave(&sddc->refs, flags);
++	if (refcount_dec_and_test(&ref->refs)) {
++		WARN_ON_ONCE(__xa_erase(&sddc->refs, ref->cookie.id) != ref);
++		dead = true;
++	}
++	xa_unlock_irqrestore(&sddc->refs, flags);
++
++	if (dead)
++		zram_sddc_ref_queue_free(ref);
++}
++
++/* ref_pin() contributes one temporary reference.  Index heuristics must
++ * compare the resident owner/consumer count, not the snapshot's pin. */
++static u32 zram_sddc_ref_count_without_pin(
++		const struct zram_sddc_ref *ref)
++{
++	u32 count = refcount_read(&ref->refs);
++
++	return count ? count - 1 : 0;
++}
++
++static void zram_sddc_ref_drop_cookie(struct zram_sddc *sddc,
++		const struct zram_sddc_cookie *cookie)
++{
++	struct zram_sddc_ref *ref;
++	unsigned long flags;
++	bool dead = false;
++
++	xa_lock_irqsave(&sddc->refs, flags);
++	ref = xa_load(&sddc->refs, cookie->id);
++	if (WARN_ON_ONCE(!ref ||
++			 !zram_sddc_cookie_equal(&ref->cookie, cookie))) {
++		xa_unlock_irqrestore(&sddc->refs, flags);
++		return;
++	}
++	if (refcount_dec_and_test(&ref->refs)) {
++		WARN_ON_ONCE(__xa_erase(&sddc->refs, ref->cookie.id) != ref);
++		dead = true;
++	}
++	xa_unlock_irqrestore(&sddc->refs, flags);
++
++	if (dead)
++		zram_sddc_ref_queue_free(ref);
++}
++
++static void zram_sddc_copy_ref(struct zram_sddc_ref *ref, void *dst)
++{
++	void *src;
++
++	src = zs_map_object(ref->sddc->zram->mem_pool, ref->handle, ZS_MM_RO);
++	memcpy(dst, src, ref->size);
++	zs_unmap_object(ref->sddc->zram->mem_pool, ref->handle);
++}
++
++static bool zram_sddc_job_matches_locked(struct zram_sddc *sddc,
++		const struct zram_sddc_job_key *key, bool own_reservation)
++{
++	struct zram *zram = sddc->zram;
++	void *state_entry;
++
++	if (key->index >= sddc->nr_slots)
++		return false;
++	if (sddc->mutation_seq[key->index] != key->mutation_seq)
++		return false;
++	state_entry = zram_sddc_state_load_raw(sddc, key->index);
++	/* A conversion reserves its target before taking this lock.  That
++	 * reservation is valid only for the caller which explicitly owns it;
++	 * ordinary observation validation must reject every reservation. */
++	if (own_reservation) {
++		if (state_entry != XA_ZERO_ENTRY)
++			return false;
++	} else if (state_entry) {
++		return false;
++	}
++	if (zram->table[key->index].handle != key->handle)
++		return false;
++	if (zram_sddc_obj_size(zram, key->index) != key->size)
++		return false;
++	if (zram_sddc_priority(zram, key->index) != key->prio)
++		return false;
++	if (!key->handle || key->size < ZRAM_SDDC_SAMPLE_SIZE ||
++	    key->size > PAGE_SIZE)
++		return false;
++	if (zram_sddc_test_flag(zram, key->index, ZRAM_SAME) ||
++	    zram_sddc_test_flag(zram, key->index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, key->index, ZRAM_UNDER_WB))
++		return false;
++
++	return key->prio == ZRAM_PRIMARY_COMP &&
++		zram->comps[key->prio] &&
++		zcomp_supports_delta(zram->comps[key->prio]);
++}
++
++static u32 zram_sddc_index_cell(u32 index)
++{
++	/* Slot zero is valid, so reserve zero as the empty marker. */
++	return index + 1;
++}
++
++static u32 zram_sddc_index_decode(u32 cell)
++{
++	return cell - 1;
++}
++
++static void zram_sddc_index_quality(struct zram_sddc *sddc,
++		u32 cell, u32 *ref_count, u32 *size)
++{
++	struct zram *zram = sddc->zram;
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_ref *ref = NULL;
++	void *entry;
++	u32 index;
++
++	*ref_count = 0;
++	*size = 0;
++	if (!cell)
++		return;
++	index = zram_sddc_index_decode(cell);
++	if (index >= sddc->nr_slots || !zram->table) {
++		/* An unresolvable cell is protected from eviction.  It will be
++		 * rejected by source validation and naturally replaced later. */
++		*ref_count = U32_MAX;
++		*size = U32_MAX;
++		return;
++	}
++
++	/* Insertion runs under index_lock, while publication runs under a slot
++	 * lock and then takes index_lock.  Never wait for the slot here: a
++	 * blocking acquisition would invert that order and can deadlock against
++	 * a concurrent publication.  A busy cell is simply protected for this
++	 * insertion attempt and will be reconsidered on a later replacement. */
++	if (!bit_spin_trylock(ZRAM_LOCK, &zram->table[index].flags)) {
++		*ref_count = U32_MAX;
++		*size = U32_MAX;
++		return;
++	}
++	entry = zram_sddc_state_load_raw(sddc, index);
++	if (entry && entry != XA_ZERO_ENTRY && !xa_is_err(entry)) {
++		state = entry;
++		if (state->kind == ZRAM_SDDC_REF)
++			ref = zram_sddc_ref_pin(sddc, &state->ref);
++	}
++	if (ref) {
++		*ref_count = zram_sddc_ref_count_without_pin(ref);
++		*size = ref->size;
++	} else if (!entry) {
++		*size = zram_sddc_obj_size(zram, index);
++	}
++	bit_spin_unlock(ZRAM_LOCK, &zram->table[index].flags);
++	zram_sddc_ref_put(ref);
++}
++
++/* Huawei's table keeps highly shared references resident even when a new
++ * object has the same sample score.  Ordinary objects (ref_count == 0) and
++ * one-use references are allowed to rotate on a tie so the table does not
++ * become permanently pinned by its first occupants. */
++static bool zram_sddc_index_candidate_worse(u32 incumbent_ref,
++		u32 incumbent_size, u32 candidate_ref, u32 candidate_size)
++{
++	if (candidate_ref != incumbent_ref)
++		return candidate_ref < incumbent_ref;
++	if (candidate_size != incumbent_size)
++		return candidate_size < incumbent_size;
++	return incumbent_ref <= 2;
++}
++
++static void zram_sddc_index_insert(struct zram_sddc *sddc,
++		struct zram_sddc_bucket *index, u32 hash, u32 slot_index)
++{
++	struct zram_sddc_bucket *bucket;
++	u32 replacement = U32_MAX;
++	u32 replacement_ref = 0;
++	u32 replacement_size = 0;
++	u32 slot;
++	unsigned int i;
++
++	bucket = &index[hash & (ZRAM_SDDC_HASH_BUCKETS - 1)];
++	slot = zram_sddc_index_cell(slot_index);
++	for (i = 0; i < ZRAM_SDDC_BUCKET_WAYS; i++) {
++		u32 ref_count;
++		u32 size;
++
++		if (bucket->cells[i] == slot)
++			return;
++		if (!bucket->cells[i]) {
++			replacement = i;
++			replacement_ref = 0;
++			replacement_size = 0;
++			break;
++		}
++		zram_sddc_index_quality(sddc, bucket->cells[i], &ref_count,
++				&size);
++		if (replacement == U32_MAX ||
++			zram_sddc_index_candidate_worse(replacement_ref,
++				replacement_size, ref_count, size)) {
++			replacement = i;
++			replacement_ref = ref_count;
++			replacement_size = size;
++		}
++	}
++	/* A busy or otherwise unresolvable cell is protected.  If every way is
++	 * protected, defer this insertion rather than evicting one blindly. */
++	if (replacement == U32_MAX || replacement_ref == U32_MAX)
++		return;
++	bucket->cells[replacement] = slot;
++	bucket->next = (bucket->next + 1) % ZRAM_SDDC_BUCKET_WAYS;
++}
++
++static unsigned int zram_sddc_index_candidates(
++		struct zram_sddc_bucket *index, u32 hash, u8 sample_kind,
++		struct zram_sddc_candidate *candidates, unsigned int count,
++		unsigned int max)
++{
++	struct zram_sddc_bucket *bucket;
++	unsigned int i;
++	unsigned int j;
++
++	bucket = &index[hash & (ZRAM_SDDC_HASH_BUCKETS - 1)];
++	for (i = 0; i < ZRAM_SDDC_BUCKET_WAYS && count < max; i++) {
++		u32 cell = bucket->cells[i];
++		bool duplicate = false;
++
++		if (!cell)
++			continue;
++		for (j = 0; j < count; j++) {
++			if (candidates[j].index == zram_sddc_index_decode(cell)) {
++				candidates[j].sample_kind |= sample_kind;
++				duplicate = true;
++				break;
++			}
++		}
++		if (!duplicate) {
++			candidates[count].index = zram_sddc_index_decode(cell);
++			candidates[count].sample_kind = sample_kind;
++			count++;
++		}
++	}
++
++	return count;
++}
++
++static u32 zram_sddc_head_match_bytes(const u8 *target, u32 target_size,
++		const u8 *source, u32 source_size)
++{
++	u32 common;
++	u32 score = ZRAM_SDDC_SAMPLE_SIZE;
++	u32 offset;
++
++	if (memcmp(target, source, ZRAM_SDDC_SAMPLE_SIZE))
++		return 0;
++	common = min(target_size, source_size);
++	for (offset = ZRAM_SDDC_SAMPLE_SIZE;
++	     offset + sizeof(u64) <= common; offset += sizeof(u64)) {
++		if (!memcmp(target + offset, source + offset, sizeof(u64)))
++			score += sizeof(u64);
++	}
++	return score;
++}
++
++static u32 zram_sddc_tail_match_bytes(const u8 *target, u32 target_size,
++		const u8 *source, u32 source_size)
++{
++	u32 target_offset = target_size - ZRAM_SDDC_SAMPLE_SIZE;
++	u32 source_offset = source_size - ZRAM_SDDC_SAMPLE_SIZE;
++	u32 score = ZRAM_SDDC_SAMPLE_SIZE;
++
++	if (memcmp(target + target_offset, source + source_offset,
++		   ZRAM_SDDC_SAMPLE_SIZE))
++		return 0;
++	while (target_offset >= sizeof(u64) && source_offset >= sizeof(u64)) {
++		target_offset -= sizeof(u64);
++		source_offset -= sizeof(u64);
++		if (!memcmp(target + target_offset, source + source_offset,
++			    sizeof(u64)))
++			score += sizeof(u64);
++	}
++	return score;
++}
++
++static u32 zram_sddc_match_bytes(const void *target, u32 target_size,
++		const void *source, u32 source_size, u8 sample_kind)
++{
++	u32 score = 0;
++
++	if (target_size < ZRAM_SDDC_SAMPLE_SIZE ||
++	    source_size < ZRAM_SDDC_SAMPLE_SIZE)
++		return 0;
++	if (sample_kind & ZRAM_SDDC_SAMPLE_HEAD)
++		score = zram_sddc_head_match_bytes(target, target_size, source,
++				source_size);
++	if (sample_kind & ZRAM_SDDC_SAMPLE_TAIL)
++		score = max(score, zram_sddc_tail_match_bytes(target,
++				target_size, source, source_size));
++	return score;
++}
++
++static bool zram_sddc_sample_eligible(u32 size)
++{
++	return size > ZRAM_SDDC_INDEX_MIN_SIZE && size <= PAGE_SIZE;
++}
++
++static void
++zram_sddc_rank_data(const struct zram_sddc_job_key *target,
++		       const void *target_data,
++		       const struct zram_sddc_candidate *candidate,
++		       const void *source_data, u32 source_size, u32 ref_count,
++		       struct zram_sddc_ranked_candidate *ranked)
++{
++	u32 match_bytes = 0;
++
++	if ((candidate->sample_kind & ZRAM_SDDC_SAMPLE_HEAD) &&
++	    source_size == target->size &&
++	    !memcmp(source_data, target_data, target->size))
++		match_bytes = target->size;
++	else if ((source_size == PAGE_SIZE) == (target->size == PAGE_SIZE))
++		match_bytes = zram_sddc_match_bytes(target_data,
++						       target->size,
++						       source_data, source_size,
++						       candidate->sample_kind);
++
++	ranked->candidate = *candidate;
++	ranked->match_bytes = match_bytes;
++	ranked->ref_count = ref_count;
++	ranked->source_size = source_size;
++}
++
++static bool
++zram_sddc_rank_candidate(struct zram_sddc *sddc,
++			    const struct zram_sddc_job_key *target,
++			    const void *target_data,
++			    const struct zram_sddc_candidate *candidate,
++			    struct zram_sddc_ranked_candidate *ranked)
++{
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_ref *ref;
++	struct zram *zram = sddc->zram;
++	unsigned long handle;
++	void *state_entry;
++	u32 source_size;
++	u32 source_prio;
++	void *source_data;
++
++	if (candidate->index == target->index ||
++	    candidate->index >= sddc->nr_slots)
++		return false;
++
++	zram_sddc_slot_lock(zram, candidate->index);
++	state_entry = zram_sddc_state_load_raw(sddc, candidate->index);
++	if (state_entry == XA_ZERO_ENTRY || xa_is_err(state_entry) ||
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_SAME) ||
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_UNDER_WB))
++		goto unlock;
++
++	state = state_entry;
++	if (state && state->kind == ZRAM_SDDC_REF) {
++		ref = zram_sddc_ref_pin(sddc, &state->ref);
++		zram_sddc_slot_unlock(zram, candidate->index);
++		if (!ref)
++			return false;
++		if (!ref->handle || ref->size < ZRAM_SDDC_SAMPLE_SIZE ||
++		    ref->size > PAGE_SIZE || ref->prio >= ZRAM_MAX_COMPS ||
++		    ref->prio != target->prio) {
++			zram_sddc_ref_put(ref);
++			return false;
++		}
++
++		source_data =
++			zs_map_object(zram->mem_pool, ref->handle, ZS_MM_RO);
++		zram_sddc_rank_data(target, target_data, candidate,
++				       source_data, ref->size,
++				       zram_sddc_ref_count_without_pin(ref),
++				       ranked);
++		zs_unmap_object(zram->mem_pool, ref->handle);
++		zram_sddc_ref_put(ref);
++		return true;
++	}
++	if (state)
++		goto unlock;
++
++	handle = zram->table[candidate->index].handle;
++	source_size = zram_sddc_obj_size(zram, candidate->index);
++	source_prio = zram_sddc_priority(zram, candidate->index);
++	if (!handle || source_size < ZRAM_SDDC_SAMPLE_SIZE ||
++	    source_size > PAGE_SIZE || source_prio != target->prio)
++		goto unlock;
++
++	source_data = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
++	zram_sddc_rank_data(target, target_data, candidate, source_data,
++			       source_size, 0, ranked);
++	zs_unmap_object(zram->mem_pool, handle);
++	zram_sddc_slot_unlock(zram, candidate->index);
++	return true;
++
++unlock:
++	zram_sddc_slot_unlock(zram, candidate->index);
++	return false;
++}
++
++static int zram_sddc_ranked_candidate_cmp(const void *left,
++		const void *right)
++{
++	const struct zram_sddc_ranked_candidate *a = left;
++	const struct zram_sddc_ranked_candidate *b = right;
++
++	if (a->match_bytes != b->match_bytes)
++		return a->match_bytes < b->match_bytes ? 1 : -1;
++	if (a->ref_count != b->ref_count)
++		return a->ref_count < b->ref_count ? 1 : -1;
++	if (a->source_size != b->source_size)
++		return a->source_size < b->source_size ? 1 : -1;
++	return 0;
++}
++
++static unsigned int zram_sddc_rank_candidates(struct zram_sddc *sddc,
++		const struct zram_sddc_job_key *target, const void *target_data,
++		struct zram_sddc_candidate *candidates, unsigned int count,
++		struct zram_sddc_ranked_candidate *ranked)
++{
++	unsigned int i;
++	unsigned int ranked_count = 0;
++
++	for (i = 0; i < count; i++) {
++		if (zram_sddc_rank_candidate(sddc, target, target_data,
++				&candidates[i], &ranked[ranked_count]))
++			ranked_count++;
++	}
++	sort(ranked, ranked_count, sizeof(*ranked),
++		zram_sddc_ranked_candidate_cmp, NULL);
++	return ranked_count;
++}
++
++static bool zram_sddc_delta_target_eligible(u32 size)
++{
++	return size > ZRAM_SDDC_DELTA_MIN_SIZE &&
++		size > sizeof(struct zram_sddc_delta_header) +
++		ZRAM_SDDC_DELTA_GAIN_MIN;
++}
++
++static bool zram_sddc_source_snapshot(struct zram_sddc *sddc,
++		const struct zram_sddc_candidate *candidate,
++		const struct zram_sddc_job_key *target, void *payload,
++		struct zram_sddc_source *source)
++{
++	struct zram_sddc_slot_state *state;
++	struct zram *zram = sddc->zram;
++	void *state_entry;
++	void *src;
++
++	memset(source, 0, sizeof(*source));
++	if (candidate->index == target->index ||
++	    candidate->index >= sddc->nr_slots)
++		return false;
++
++	zram_sddc_slot_lock(zram, candidate->index);
++	state_entry = zram_sddc_state_load_raw(sddc, candidate->index);
++	if (state_entry == XA_ZERO_ENTRY || xa_is_err(state_entry))
++		goto unlock;
++	state = state_entry;
++	if (zram_sddc_test_flag(zram, candidate->index, ZRAM_SAME) ||
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_UNDER_WB))
++		goto unlock;
++
++	source->key.index = candidate->index;
++	source->key.mutation_seq = sddc->mutation_seq[candidate->index];
++	if (state && state->kind == ZRAM_SDDC_REF) {
++		source->cookie = state->ref;
++		source->ref = zram_sddc_ref_pin(sddc, &state->ref);
++		if (!source->ref)
++			goto unlock;
++		source->key.size = source->ref->size;
++		source->key.prio = source->ref->prio;
++		zram_sddc_slot_unlock(zram, candidate->index);
++		if (!source->ref->handle ||
++		    source->key.size < ZRAM_SDDC_SAMPLE_SIZE ||
++		    source->key.size > PAGE_SIZE ||
++		    source->key.prio >= ZRAM_MAX_COMPS ||
++		    source->key.prio != target->prio) {
++			zram_sddc_ref_put(source->ref);
++			source->ref = NULL;
++			return false;
++		}
++		zram_sddc_copy_ref(source->ref, payload);
++		return true;
++	}
++
++	if (state)
++		goto unlock;
++	source->key.handle = zram->table[candidate->index].handle;
++	source->key.size = zram_sddc_obj_size(zram, candidate->index);
++	source->key.prio = zram_sddc_priority(zram, candidate->index);
++	if (!source->key.handle || source->key.size < ZRAM_SDDC_SAMPLE_SIZE ||
++	    source->key.size > PAGE_SIZE || source->key.prio != target->prio)
++		goto unlock;
++
++	src = zs_map_object(zram->mem_pool, source->key.handle, ZS_MM_RO);
++	memcpy(payload, src, source->key.size);
++	zs_unmap_object(zram->mem_pool, source->key.handle);
++	source->ordinary = true;
++	zram_sddc_slot_unlock(zram, candidate->index);
++	return true;
++
++unlock:
++	zram_sddc_slot_unlock(zram, candidate->index);
++	return false;
++}
++
++static struct zram_sddc_ref *
++zram_sddc_promote_source(struct zram_sddc *sddc,
++		struct zram_sddc_source *source,
++		struct zram_sddc_slot_state **prepared_state)
++{
++	struct zram_sddc_ref *ref;
++	struct zram_sddc_slot_state *state;
++	struct zram *zram = sddc->zram;
++
++	if (source->ref)
++		return source->ref;
++	if (!source->ordinary || !prepared_state || !*prepared_state)
++		return NULL;
++	state = *prepared_state;
++
++	ref = zram_sddc_ref_alloc(sddc);
++	if (IS_ERR(ref))
++		return NULL;
++
++	zram_sddc_slot_lock(zram, source->key.index);
++	if (sddc->mutation_seq[source->key.index] !=
++			source->key.mutation_seq ||
++		zram_sddc_state_load_raw(sddc, source->key.index) !=
++				XA_ZERO_ENTRY ||
++	    zram->table[source->key.index].handle != source->key.handle ||
++	    zram_sddc_obj_size(zram, source->key.index) != source->key.size ||
++	    zram_sddc_priority(zram, source->key.index) != source->key.prio ||
++	    zram_sddc_test_flag(zram, source->key.index, ZRAM_SAME) ||
++	    zram_sddc_test_flag(zram, source->key.index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, source->key.index, ZRAM_UNDER_WB))
++		goto fail_unlock;
++
++	ref->handle = source->key.handle;
++	ref->size = source->key.size;
++	ref->prio = source->key.prio;
++	refcount_set(&ref->refs, 2);
++	state->kind = ZRAM_SDDC_REF;
++	state->ref = ref->cookie;
++	if (!zram_sddc_state_install_locked(sddc, source->key.index,
++			state))
++		goto restore_account;
++	if (!zram_sddc_ref_publish(sddc, ref))
++		goto fail_state;
++
++	zram_sddc_clear_storage_flags(zram, source->key.index);
++	zram->table[source->key.index].handle = 0;
++	zram_sddc_set_obj_size(zram, source->key.index, 0);
++	atomic64_inc(&sddc->stats.refs);
++	atomic64_add(ref->size, &sddc->stats.ref_bytes);
++	zram_sddc_slot_unlock(zram, source->key.index);
++	*prepared_state = NULL;
++	source->ref = ref;
++	source->cookie = ref->cookie;
++	return ref;
++
++fail_state:
++	if (WARN_ON_ONCE(!zram_sddc_xa_erase_if(&sddc->slot_states,
++			source->key.index, state)))
++		goto restore_account;
++	*prepared_state = NULL;
++	kfree(state);
++restore_account:
++fail_unlock:
++	zram_sddc_slot_unlock(zram, source->key.index);
++	zram_sddc_ref_abort(ref);
++	return NULL;
++}
++
++static bool zram_sddc_commit_target(struct zram_sddc *sddc,
++		const struct zram_sddc_job_key *target,
++		struct zram_sddc_ref *ref, enum zram_sddc_kind kind,
++		unsigned long new_handle, u32 new_size,
++		struct zram_sddc_slot_state **prepared_state)
++{
++	struct zram_sddc_slot_state *state;
++	struct zram *zram = sddc->zram;
++	unsigned long old_handle;
++	u32 old_size;
++	u32 saved_size;
++	bool committed = false;
++
++	if (!prepared_state || !*prepared_state)
++		return false;
++	state = *prepared_state;
++
++	zram_sddc_slot_lock(zram, target->index);
++	if (!zram_sddc_job_matches_locked(sddc, target, true))
++		goto unlock;
++
++	old_handle = zram->table[target->index].handle;
++	old_size = zram_sddc_obj_size(zram, target->index);
++	saved_size = old_size > new_size ? old_size - new_size : 0;
++	state->kind = kind;
++	state->ref = ref->cookie;
++	state->accounted_size = new_size;
++	state->saved_size = saved_size;
++	if (!zram_sddc_state_install_locked(sddc, target->index, state))
++		goto restore_account;
++	zram_sddc_clear_storage_flags(zram, target->index);
++	zs_free(zram->mem_pool, old_handle);
++	atomic64_sub(old_size, &zram->stats.compr_data_size);
++	zram->table[target->index].handle = new_handle;
++	zram_sddc_set_obj_size(zram, target->index, new_size);
++	if (new_size)
++		atomic64_add(new_size, &zram->stats.compr_data_size);
++	atomic64_add(saved_size, &sddc->stats.saved_bytes);
++	atomic64_add(saved_size, &sddc->stats.saved_bytes_total);
++	if (kind == ZRAM_SDDC_ALIAS) {
++		atomic64_inc(&sddc->stats.aliases);
++	} else if (kind == ZRAM_SDDC_DELTA) {
++		atomic64_inc(&sddc->stats.deltas);
++		atomic64_add(new_size, &sddc->stats.delta_bytes);
++	}
++	*prepared_state = NULL;
++	committed = true;
++	goto unlock;
++
++restore_account:
++
++unlock:
++	zram_sddc_slot_unlock(zram, target->index);
++	return committed;
++}
++
++static bool zram_sddc_try_alias(struct zram_sddc *sddc,
++		const struct zram_sddc_job_key *target, const void *target_data,
++		const struct zram_sddc_candidate *candidate, void *ref_data)
++{
++	struct zram_sddc_slot_state *source_state = NULL;
++	struct zram_sddc_slot_state *target_state = NULL;
++	struct zram_sddc_source source;
++	struct zram_sddc_ref *ref;
++	bool committed = false;
++
++	if (!zram_sddc_source_snapshot(sddc, candidate, target, ref_data,
++			&source))
++		return false;
++	if (source.key.size != target->size ||
++	    memcmp(ref_data, target_data, target->size))
++		goto out;
++
++	target_state = zram_sddc_state_prepare(sddc, target->index);
++	if (!target_state)
++		goto allocation_failed;
++	if (source.ordinary) {
++		source_state = zram_sddc_state_prepare(sddc,
++				source.key.index);
++		if (!source_state)
++			goto allocation_failed;
++	}
++
++	ref = zram_sddc_promote_source(sddc, &source, &source_state);
++	if (!ref) {
++		atomic64_inc(&sddc->stats.conversion_failures);
++		goto out;
++	}
++	if (zram_sddc_commit_target(sddc, target, ref,
++			ZRAM_SDDC_ALIAS, 0, 0, &target_state)) {
++		source.ref = NULL;
++		committed = true;
++		goto out;
++	}
++
++	zram_sddc_ref_put(ref);
++	source.ref = NULL;
++	atomic64_inc(&sddc->stats.conversion_failures);
++	goto out;
++
++allocation_failed:
++	atomic64_inc(&sddc->stats.conversion_failures);
++out:
++	zram_sddc_ref_put(source.ref);
++	zram_sddc_state_abort(sddc, source.key.index,
++			source.key.mutation_seq, source_state);
++	zram_sddc_state_abort(sddc, target->index, target->mutation_seq,
++			target_state);
++	return committed;
++}
++
++static bool zram_sddc_try_delta(struct zram_sddc *sddc,
++		const struct zram_sddc_job_key *target, const void *target_data,
++		const struct zram_sddc_candidate *candidate,
++		struct zram_sddc_workspace *workspace)
++{
++	struct zram_sddc_delta_header header;
++	struct zram_sddc_slot_state *source_state = NULL;
++	struct zram_sddc_slot_state *target_state = NULL;
++	struct zram_sddc_source source;
++	struct zram_sddc_ref *ref;
++	struct zcomp_strm *zstrm;
++	unsigned long handle;
++	unsigned int delta_len;
++	unsigned int out_limit;
++	u32 wire_size;
++	void *delta = (u8 *)workspace->wire + sizeof(header);
++	void *dst;
++	bool committed = false;
++	int ret;
++
++	/* Keep the async delta path aligned with Huawei's high-yield admission
++	 * heuristic.  Smaller objects may still use the exact-alias path, but the
++	 * 24-byte delta header and codec work are not worthwhile below this floor. */
++	if (!zram_sddc_delta_target_eligible(target->size)) {
++		atomic64_inc(&sddc->stats.delta_small_rejects);
++		return false;
++	}
++	if (!zram_sddc_source_snapshot(sddc, candidate, target,
++			workspace->ref_data, &source))
++		return false;
++	if ((source.key.size == PAGE_SIZE) != (target->size == PAGE_SIZE))
++		goto out;
++
++	target_state = zram_sddc_state_prepare(sddc, target->index);
++	if (!target_state)
++		goto allocation_failed;
++	if (source.ordinary) {
++		source_state = zram_sddc_state_prepare(sddc,
++				source.key.index);
++		if (!source_state)
++			goto allocation_failed;
++	}
++
++	out_limit = target->size - sizeof(header) -
++		ZRAM_SDDC_DELTA_GAIN_MIN;
++	zstrm = zcomp_stream_get(sddc->zram->comps[target->prio]);
++	if (!zstrm)
++		goto out;
++	delta_len = 2 * PAGE_SIZE;
++	ret = zcomp_compress_delta(zstrm, workspace->ref_data, source.key.size,
++			target_data, target->size, &delta_len, out_limit);
++	if (!ret && delta_len && delta_len <= out_limit)
++		memcpy(delta, zstrm->buffer, delta_len);
++	else
++		delta = NULL;
++	zcomp_stream_put(sddc->zram->comps[target->prio]);
++	if (!delta) {
++		atomic64_inc(&sddc->stats.delta_no_gain);
++		goto out;
++	}
++
++	wire_size = sizeof(header) + delta_len;
++	if (zs_lookup_class_index(sddc->zram->mem_pool, wire_size) >=
++	    zs_lookup_class_index(sddc->zram->mem_pool, target->size)) {
++		atomic64_inc(&sddc->stats.delta_no_gain);
++		goto out;
++	}
++	handle = zs_malloc(sddc->zram->mem_pool, wire_size,
++			GFP_NOIO | __GFP_HIGHMEM | __GFP_MOVABLE | __GFP_CMA);
++	if (IS_ERR_VALUE(handle)) {
++		atomic64_inc(&sddc->stats.conversion_failures);
++		goto out;
++	}
++	if (!zram_sddc_memory_limit_ok(sddc->zram)) {
++		atomic64_inc(&sddc->stats.limit_rejects);
++		atomic64_inc(&sddc->stats.conversion_failures);
++		goto free_handle;
++	}
++
++	ref = zram_sddc_promote_source(sddc, &source, &source_state);
++	if (!ref) {
++		atomic64_inc(&sddc->stats.conversion_failures);
++		goto free_handle;
++	}
++	header.magic = cpu_to_le32(ZRAM_SDDC_DELTA_MAGIC);
++	header.version = cpu_to_le16(ZRAM_SDDC_DELTA_VERSION);
++	header.header_size = cpu_to_le16(sizeof(header));
++	header.ref_id = cpu_to_le32(ref->cookie.id);
++	header.ref_generation = cpu_to_le32(ref->cookie.generation);
++	header.ref_size = cpu_to_le32(ref->size);
++	header.target_size = cpu_to_le32(target->size);
++	memcpy(workspace->wire, &header, sizeof(header));
++	dst = zs_map_object(sddc->zram->mem_pool, handle, ZS_MM_WO);
++	memcpy(dst, workspace->wire, wire_size);
++	zs_unmap_object(sddc->zram->mem_pool, handle);
++
++	if (zram_sddc_commit_target(sddc, target, ref,
++			ZRAM_SDDC_DELTA, handle, wire_size, &target_state)) {
++		source.ref = NULL;
++		committed = true;
++		goto out;
++	}
++
++	zram_sddc_ref_put(ref);
++	source.ref = NULL;
++	atomic64_inc(&sddc->stats.conversion_failures);
++free_handle:
++	zs_free(sddc->zram->mem_pool, handle);
++out:
++	zram_sddc_ref_put(source.ref);
++	zram_sddc_state_abort(sddc, source.key.index,
++			source.key.mutation_seq, source_state);
++	zram_sddc_state_abort(sddc, target->index, target->mutation_seq,
++			target_state);
++	return committed;
++
++allocation_failed:
++	atomic64_inc(&sddc->stats.conversion_failures);
++	goto out;
++}
++
++static bool zram_sddc_try_convert(struct zram_sddc *sddc,
++		const struct zram_sddc_job_key *target, const void *target_data,
++		u32 exact_hash, u32 head_hash, u32 tail_hash,
++		struct zram_sddc_workspace *workspace)
++{
++	struct zram_sddc_candidate candidates[ZRAM_SDDC_BUCKET_WAYS * 2];
++	struct zram_sddc_ranked_candidate ranked[ARRAY_SIZE(candidates)];
++	unsigned int count = 0;
++	unsigned int i;
++	bool converted = false;
++
++	spin_lock(&sddc->index_lock);
++	count = zram_sddc_index_candidates(sddc->exact_index, exact_hash,
++			ZRAM_SDDC_SAMPLE_HEAD, candidates, count,
++				ARRAY_SIZE(candidates));
++	spin_unlock(&sddc->index_lock);
++	count = zram_sddc_rank_candidates(sddc, target, target_data,
++			candidates, count, ranked);
++	for (i = 0; i < count; i++) {
++		atomic64_inc(&sddc->stats.alias_attempts);
++		if (zram_sddc_try_alias(sddc, target, target_data,
++				&ranked[i].candidate, workspace->ref_data)) {
++			atomic64_inc(&sddc->stats.alias_hits);
++			converted = true;
++			goto out;
++		}
++	}
++	if (!zram_sddc_delta_target_eligible(target->size)) {
++		atomic64_inc(&sddc->stats.delta_small_rejects);
++		goto out;
++	}
++
++	count = 0;
++	spin_lock(&sddc->index_lock);
++	count = zram_sddc_index_candidates(sddc->sample_index, head_hash,
++			ZRAM_SDDC_SAMPLE_HEAD, candidates, count,
++			ARRAY_SIZE(candidates));
++	count = zram_sddc_index_candidates(sddc->sample_index, tail_hash,
++				ZRAM_SDDC_SAMPLE_TAIL, candidates, count,
++				ARRAY_SIZE(candidates));
++	spin_unlock(&sddc->index_lock);
++	count = zram_sddc_rank_candidates(sddc, target, target_data,
++			candidates, count, ranked);
++	for (i = 0; i < count; i++) {
++		if (ranked[i].match_bytes < ZRAM_SDDC_SIMILARITY_MIN)
++			break;
++		atomic64_inc(&sddc->stats.delta_matches);
++		zram_sddc_atomic64_update_max(&sddc->stats.delta_match_bytes_max,
++				ranked[i].match_bytes);
++		atomic64_inc(&sddc->stats.delta_attempts);
++		if (zram_sddc_try_delta(sddc, target, target_data,
++				&ranked[i].candidate, workspace)) {
++			atomic64_inc(&sddc->stats.delta_hits);
++			converted = true;
++			goto out;
++		}
++	}
++
++out:
++	return converted;
++}
++
++/* state_lock serializes the bitmap and the idle-to-running transition. */
++static bool zram_sddc_observe_mark_locked(struct zram_sddc *sddc,
++		u32 index)
++{
++	if (WARN_ON_ONCE(index >= sddc->nr_slots))
++		return false;
++	if (test_and_set_bit(index, sddc->observe_pending)) {
++		atomic64_inc(&sddc->stats.coalesced);
++		return false;
++	}
++
++	sddc->pending++;
++	zram_sddc_atomic64_update_max(&sddc->stats.pending_max,
++			sddc->pending);
++	return true;
++}
++
++static bool zram_sddc_observe_activate_locked(struct zram_sddc *sddc)
++{
++	if (sddc->observe_worker_active)
++		return false;
++
++	sddc->observe_worker_active = true;
++	return true;
++}
++
++static void zram_sddc_observe_deactivate_locked(struct zram_sddc *sddc, unsigned int work_id)
++{
++	sddc->observe_work_cursor = work_id ^ 1;
++	sddc->observe_worker_active = false;
++}
++
++static unsigned int zram_sddc_observe_discard_locked(
++		struct zram_sddc *sddc)
++{
++	unsigned int discarded = sddc->pending;
++
++	if (discarded)
++		atomic64_add(discarded, &sddc->stats.shutdown_discarded);
++	bitmap_zero(sddc->observe_pending, (unsigned int)sddc->nr_slots);
++	sddc->pending = 0;
++	return discarded;
++}
++
++static bool zram_sddc_observe_take_locked(struct zram_sddc *sddc,
++		u32 *index)
++{
++	unsigned long next;
++
++	if (!sddc->pending)
++		return false;
++
++	next = find_next_bit(sddc->observe_pending, sddc->nr_slots,
++			sddc->observe_cursor);
++	if (next >= sddc->nr_slots && sddc->observe_cursor)
++		next = find_first_bit(sddc->observe_pending, sddc->nr_slots);
++	if (WARN_ON_ONCE(next >= sddc->nr_slots)) {
++		/* Keep the bitmap/count invariant recoverable even if corruption or
++		 * an unexpected find-bit result leaves no consumable slot. */
++		bitmap_zero(sddc->observe_pending, (unsigned int)sddc->nr_slots);
++		sddc->pending = 0;
++		return false;
++	}
++
++	clear_bit(next, sddc->observe_pending);
++	sddc->pending--;
++	sddc->observe_cursor = next + 1;
++	if (sddc->observe_cursor >= sddc->nr_slots)
++		sddc->observe_cursor = 0;
++	*index = next;
++	return true;
++}
++
++static void zram_sddc_observe_index(struct zram_sddc *sddc,
++		u32 index, struct zram_sddc_workspace *workspace)
++{
++	struct zram_sddc_job_key key;
++	struct zram *zram = sddc->zram;
++	u32 exact_hash;
++	u32 head_hash;
++	u32 tail_hash;
++	void *payload = workspace->ordinary;
++	void *src;
++	bool converted;
++	bool still_matches;
++
++	down_read(&zram->init_lock);
++	if (zram->sddc != sddc || !zram->table ||
++	    index >= (zram->disksize >> PAGE_SHIFT))
++		goto out_unlock;
++
++	zram_sddc_slot_lock(zram, index);
++	zram_sddc_job_key_locked(zram, index, &key);
++	if (!key.handle) {
++		zram_sddc_slot_unlock(zram, index);
++		atomic64_inc(&sddc->stats.ineligible);
++		goto out_unlock;
++	}
++
++	src = zs_map_object(zram->mem_pool, key.handle, ZS_MM_RO);
++	memcpy(payload, src, key.size);
++	zs_unmap_object(zram->mem_pool, key.handle);
++	zram_sddc_slot_unlock(zram, index);
++
++	exact_hash = jhash(payload, key.size,
++			ZRAM_SDDC_HASH_SEED ^ key.size);
++	head_hash = jhash(payload, ZRAM_SDDC_SAMPLE_SIZE,
++			ZRAM_SDDC_HASH_SEED);
++	tail_hash = jhash(payload + key.size - ZRAM_SDDC_SAMPLE_SIZE,
++			ZRAM_SDDC_SAMPLE_SIZE, ZRAM_SDDC_HASH_SEED);
++	converted = zram_sddc_try_convert(sddc, &key, payload, exact_hash,
++			head_hash, tail_hash, workspace);
++
++	if (!converted) {
++		/* A conversion can race a rewrite after the initial snapshot.  Do not
++		 * publish an empty or managed slot.  Index cells intentionally carry
++		 * only a slot number; later source validation resolves the latest
++		 * representation and makes stale cells harmless. */
++		zram_sddc_slot_lock(zram, index);
++		still_matches = zram_sddc_job_matches_locked(sddc, &key, false);
++		if (!still_matches) {
++			zram_sddc_slot_unlock(zram, index);
++			atomic64_inc(&sddc->stats.stale);
++			goto observed;
++		}
++		spin_lock(&sddc->index_lock);
++		zram_sddc_index_insert(sddc, sddc->exact_index, exact_hash,
++				key.index);
++		if (zram_sddc_sample_eligible(key.size)) {
++			zram_sddc_index_insert(sddc, sddc->sample_index, head_hash,
++					key.index);
++			zram_sddc_index_insert(sddc, sddc->sample_index, tail_hash,
++					key.index);
++		}
++		spin_unlock(&sddc->index_lock);
++		/* Keep validation and publication in one slot critical section.  A
++		 * rewrite cannot invalidate the identity between the final check and
++		 * insertion of its candidate cell. */
++		zram_sddc_slot_unlock(zram, index);
++		atomic64_inc(&sddc->stats.indexed);
++	}
++
++observed:
++	atomic64_inc(&sddc->stats.observed);
++
++out_unlock:
++	up_read(&zram->init_lock);
++}
++
++static bool zram_sddc_observe_handoff(
++		struct zram_sddc_observe_work *observe)
++{
++	struct zram_sddc *sddc = observe->sddc;
++	bool pending;
++
++	spin_lock(&sddc->state_lock);
++	pending = !READ_ONCE(sddc->stopping) && sddc->pending;
++	spin_unlock(&sddc->state_lock);
++	if (!pending)
++		return false;
++
++	/* Transfer this callback's lifetime token to the other embedded item;
++	 * the current callback remains running until its caller returns. */
++	return queue_work(sddc->workqueue,
++			&sddc->observe_work[observe->id ^ 1].work);
++}
++
++static void zram_sddc_observe_workfn(struct work_struct *work)
++{
++	struct zram_sddc_observe_work *observe = container_of(work,
++			struct zram_sddc_observe_work, work);
++	struct zram_sddc *sddc = observe->sddc;
++	struct zram_sddc_workspace *workspace;
++	u32 index;
++	unsigned int budget = ZRAM_SDDC_OBSERVE_BUDGET;
++
++	atomic64_inc(&sddc->stats.worker_runs);
++	workspace = sddc->observe_workspace;
++	for (;;) {
++		spin_lock(&sddc->state_lock);
++		if (!zram_sddc_observe_take_locked(sddc, &index)) {
++			/* Commit to exiting while admission is serialized.  A later
++			 * producer will queue the alternate item instead of relying on
++			 * this callback while it is returning.
++			 */
++			zram_sddc_observe_deactivate_locked(sddc, observe->id);
++			spin_unlock(&sddc->state_lock);
++			break;
++		}
++		spin_unlock(&sddc->state_lock);
++
++		zram_sddc_observe_index(sddc, index, workspace);
++		cond_resched();
++		if (!--budget) {
++			bool stopping;
++
++			/* Bound each callback so a continuously rewritten device cannot
++			 * starve freezer/reset progress.  A successful handoff transfers
++			 * this callback's lifetime token and zram reference. */
++			if (zram_sddc_observe_handoff(observe)) {
++				return;
++			}
++			spin_lock(&sddc->state_lock);
++			stopping = READ_ONCE(sddc->stopping);
++			if (stopping) {
++				zram_sddc_observe_discard_locked(sddc);
++				zram_sddc_observe_deactivate_locked(sddc, observe->id);
++			}
++			spin_unlock(&sddc->state_lock);
++			if (stopping)
++				break;
++			/* A failed handoff means the alternate item is already busy.
++			 * Retain this drain's lifetime ownership and continue.
++			 */
++			budget = ZRAM_SDDC_OBSERVE_BUDGET;
++		}
++	}
++
++	/* reset/remove closes admission and drains this manager before freeing zram. */
++	zram_sddc_manager_put(sddc);
++}
++
++int zram_sddc_create(struct zram *zram, unsigned long nr_pages)
++{
++	struct zram_sddc *sddc;
++	unsigned int i;
++
++	if (!zram)
++		return -EINVAL;
++	lockdep_assert_held(&zram->sddc_lifecycle_lock);
++	lockdep_assert_held_write(&zram->init_lock);
++	if (zram->sddc)
++		return -EINVAL;
++	if (PAGE_SHIFT != 12 || !nr_pages ||
++	    nr_pages > ZRAM_SDDC_MAX_SLOTS ||
++	    !zram->comps[ZRAM_PRIMARY_COMP] ||
++	    !zcomp_supports_delta(zram->comps[ZRAM_PRIMARY_COMP]))
++		return 0;
++
++	sddc = kzalloc(sizeof(*sddc), GFP_KERNEL);
++	if (!sddc) {
++		pr_warn("%s: SDDC manager allocation failed; using ordinary compression\n",
++			zram->disk->disk_name);
++		return 0;
++	}
++	ida_init(&sddc->ref_ids);
++	xa_init(&sddc->refs);
++	xa_init(&sddc->slot_states);
++	sddc->zram = zram;
++	sddc->nr_slots = nr_pages;
++	spin_lock_init(&sddc->state_lock);
++	spin_lock_init(&sddc->index_lock);
++	spin_lock_init(&sddc->active_lock);
++	atomic_set(&sddc->active_ops, 0);
++	init_waitqueue_head(&sddc->active_wait);
++	for (i = 0; i < ZRAM_SDDC_OBSERVE_WORKS; i++) {
++		sddc->observe_work[i].sddc = sddc;
++		sddc->observe_work[i].id = i;
++		INIT_WORK(&sddc->observe_work[i].work,
++			zram_sddc_observe_workfn);
++	}
++
++	sddc->mutation_seq = vzalloc(array_size(nr_pages,
++						sizeof(*sddc->mutation_seq)));
++	sddc->observe_pending = bitmap_zalloc((unsigned int)nr_pages,
++						 GFP_KERNEL | __GFP_NOWARN);
++	sddc->exact_index = vzalloc(array_size(ZRAM_SDDC_HASH_BUCKETS,
++					       sizeof(*sddc->exact_index)));
++	sddc->sample_index = vzalloc(array_size(ZRAM_SDDC_HASH_BUCKETS,
++							sizeof(*sddc->sample_index)));
++	if (!sddc->mutation_seq || !sddc->observe_pending ||
++	    !sddc->exact_index || !sddc->sample_index)
++		goto fail;
++
++	sddc->observe_workspace = zram_sddc_workspace_alloc(GFP_KERNEL);
++	if (!sddc->observe_workspace)
++		goto fail;
++
++	/* Huawei runs SDDC recompression from a reclaim-capable worker.  Keep the
++	 * ordered/budgeted hand-off, but do not let freezer state postpone the
++	 * index while memory pressure is actively building.  reset still closes
++	 * admission and flushes this queue before taking init_lock for write. */
++	sddc->workqueue = alloc_ordered_workqueue("%s-sddc",
++				WQ_MEM_RECLAIM | WQ_HIGHPRI, zram->disk->disk_name);
++	if (!sddc->workqueue)
++		goto fail;
++	sddc->free_workqueue = alloc_workqueue("%s-sddc-free",
++			WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_HIGHPRI, 0,
++			zram->disk->disk_name);
++	if (!sddc->free_workqueue)
++		goto fail;
++
++	spin_lock(&zram->sddc_lock);
++	WARN_ON_ONCE(zram->sddc);
++	WRITE_ONCE(zram->sddc, sddc);
++	spin_unlock(&zram->sddc_lock);
++	return 0;
++
++fail:
++	pr_warn("%s: SDDC metadata allocation failed; using ordinary compression\n",
++		zram->disk->disk_name);
++	if (sddc->free_workqueue)
++		destroy_workqueue(sddc->free_workqueue);
++	if (sddc->workqueue)
++		destroy_workqueue(sddc->workqueue);
++	zram_sddc_workspace_free(sddc->observe_workspace);
++	bitmap_free(sddc->observe_pending);
++	vfree(sddc->sample_index);
++	vfree(sddc->exact_index);
++	vfree(sddc->mutation_seq);
++	xa_destroy(&sddc->slot_states);
++	xa_destroy(&sddc->refs);
++	ida_destroy(&sddc->ref_ids);
++	kfree(sddc);
++	/* SDDC is opportunistic; retain ordinary LZ4KD zram on allocation loss. */
++	return 0;
++}
++
++void zram_sddc_stop(struct zram *zram)
++{
++	struct zram_sddc *sddc;
++
++	if (!zram)
++		return;
++	lockdep_assert_held(&zram->sddc_lifecycle_lock);
++	spin_lock(&zram->sddc_lock);
++	sddc = READ_ONCE(zram->sddc);
++	if (sddc)
++		WRITE_ONCE(sddc->stopping, true);
++	spin_unlock(&zram->sddc_lock);
++	if (!sddc)
++		return;
++
++	spin_lock(&sddc->state_lock);
++	zram_sddc_observe_discard_locked(sddc);
++	spin_unlock(&sddc->state_lock);
++	flush_workqueue(sddc->workqueue);
++	zram_sddc_manager_wait_idle(sddc);
++	WARN_ON_ONCE(READ_ONCE(sddc->pending));
++	flush_workqueue(sddc->free_workqueue);
++}
++
++/* The normal zram teardown path frees every slot before reaching destroy().
++ * Keep the invariant failure recoverable nevertheless: xarray nodes do not
++ * own the heap values stored in them, and ref values may still own zsmalloc
++ * handles.  At this point active operations and free work are quiescent. */
++static void zram_sddc_destroy_metadata(struct zram_sddc *sddc)
++{
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_ref *ref;
++	unsigned long index;
++
++	xa_for_each(&sddc->slot_states, index, state) {
++		if (!state || state == XA_ZERO_ENTRY || xa_is_err(state))
++			continue;
++		if (xa_erase(&sddc->slot_states, index) == state)
++			kfree(state);
++	}
++
++	/* A ref is removed from the xarray before its deferred free work is
++	 * queued, so anything left here can be released synchronously. */
++	xa_for_each(&sddc->refs, index, ref) {
++		if (!ref || ref == XA_ZERO_ENTRY || xa_is_err(ref))
++			continue;
++		if (xa_erase(&sddc->refs, index) == ref)
++			zram_sddc_ref_release(ref);
++	}
++}
++
++void zram_sddc_destroy(struct zram *zram)
++{
++	struct zram_sddc *sddc;
++
++	if (!zram)
++		return;
++	lockdep_assert_held(&zram->sddc_lifecycle_lock);
++	lockdep_assert_held_write(&zram->init_lock);
++	sddc = zram->sddc;
++	if (!sddc)
++		return;
++
++	WARN_ON_ONCE(!READ_ONCE(sddc->stopping));
++	WARN_ON_ONCE(atomic_read(&sddc->active_ops));
++	WARN_ON_ONCE(READ_ONCE(sddc->pending));
++	spin_lock(&zram->sddc_lock);
++	WARN_ON_ONCE(zram->sddc != sddc);
++	WRITE_ONCE(zram->sddc, NULL);
++	spin_unlock(&zram->sddc_lock);
++	flush_workqueue(sddc->free_workqueue);
++	WARN_ON_ONCE(!xa_empty(&sddc->slot_states));
++	WARN_ON_ONCE(!xa_empty(&sddc->refs));
++	destroy_workqueue(sddc->workqueue);
++	destroy_workqueue(sddc->free_workqueue);
++	zram_sddc_destroy_metadata(sddc);
++	bitmap_free(sddc->observe_pending);
++	zram_sddc_workspace_free(sddc->observe_workspace);
++	vfree(sddc->sample_index);
++	vfree(sddc->exact_index);
++	vfree(sddc->mutation_seq);
++	xa_destroy(&sddc->slot_states);
++	xa_destroy(&sddc->refs);
++	ida_destroy(&sddc->ref_ids);
++	kfree(sddc);
++}
++
++enum zram_sddc_kind zram_sddc_slot_free_locked(struct zram *zram,
++		u32 index)
++{
++	struct zram_sddc *sddc = zram->sddc;
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_cookie cookie;
++	enum zram_sddc_kind kind;
++	u32 accounted_size;
++	u32 saved_size;
++
++	if (!sddc || index >= sddc->nr_slots)
++		return ZRAM_SDDC_NONE;
++
++	state = zram_sddc_state_load_raw(sddc, index);
++	if (xa_is_err(state)) {
++		WARN_ON_ONCE(1);
++		state = NULL;
++	} else if (xa_is_zero(state)) {
++		state = NULL;
++	} else if (state) {
++		state = zram_sddc_xa_erase_if(&sddc->slot_states, index,
++				state);
++		if (!state) {
++			WARN_ON_ONCE(1);
++		}
++	}
++	if (state) {
++		kind = state->kind;
++		cookie = state->ref;
++		accounted_size = state->accounted_size;
++		saved_size = state->saved_size;
++	} else {
++		kind = ZRAM_SDDC_NONE;
++		memset(&cookie, 0, sizeof(cookie));
++		accounted_size = 0;
++		saved_size = 0;
++	}
++	zram_sddc_mutation_advance_locked(sddc, index);
++	if (kind == ZRAM_SDDC_ALIAS)
++		atomic64_dec(&sddc->stats.aliases);
++	else if (kind == ZRAM_SDDC_DELTA) {
++		atomic64_dec(&sddc->stats.deltas);
++		atomic64_sub(accounted_size, &sddc->stats.delta_bytes);
++	}
++	atomic64_sub(saved_size, &sddc->stats.saved_bytes);
++	if (kind != ZRAM_SDDC_NONE)
++		zram_sddc_ref_drop_cookie(sddc, &cookie);
++	kfree(state);
++
++	return kind;
++}
++
++void zram_sddc_slot_stored_locked(struct zram *zram, u32 index)
++{
++	struct zram_sddc *sddc = zram->sddc;
++	void *entry;
++
++	if (sddc && index < sddc->nr_slots) {
++		entry = zram_sddc_state_load_raw(sddc, index);
++		WARN_ON_ONCE(entry && entry != XA_ZERO_ENTRY);
++		zram_sddc_mutation_advance_locked(sddc, index);
++	}
++}
++
++void zram_sddc_job_key_locked(struct zram *zram, u32 index,
++		struct zram_sddc_job_key *key)
++{
++	struct zram_sddc *sddc = zram->sddc;
++	void *state_entry;
++	unsigned long handle;
++	u32 size;
++	u32 prio;
++
++	memset(key, 0, sizeof(*key));
++	if (!sddc || index >= sddc->nr_slots)
++		return;
++	/* Treat an in-flight XA_ZERO_ENTRY reservation as ineligible too.  The
++	 * owner will requeue the slot after aborting, so producers must not build
++	 * keys that can only fail reservation admission. */
++	state_entry = zram_sddc_state_load_raw(sddc, index);
++	if (state_entry ||
++	    zram_sddc_test_flag(zram, index, ZRAM_SAME) ||
++	    zram_sddc_test_flag(zram, index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, index, ZRAM_UNDER_WB))
++		return;
++
++	handle = zram->table[index].handle;
++	size = zram_sddc_obj_size(zram, index);
++	prio = zram_sddc_priority(zram, index);
++	/* Small streams do not enter the asynchronous SDDC index.  This keeps
++	 * index pressure and observation CPU focused on objects with useful
++	 * sharing/delta potential, matching the original admission heuristic. */
++	if (!handle || size <= ZRAM_SDDC_INDEX_MIN_SIZE || size > PAGE_SIZE ||
++	    prio != ZRAM_PRIMARY_COMP || !zram->comps[prio] ||
++	    !zcomp_supports_delta(zram->comps[prio]))
++		return;
++
++	key->index = index;
++	key->mutation_seq = sddc->mutation_seq[index];
++	key->handle = handle;
++	key->size = size;
++	key->prio = prio;
++}
++
++void zram_sddc_requeue_observation(struct zram *zram, u32 index)
++{
++	struct zram_sddc_job_key key;
++	struct zram_sddc *sddc;
++
++	if (!zram)
++		return;
++	sddc = zram_sddc_manager_get(zram);
++	if (!sddc)
++		return;
++	if (index >= sddc->nr_slots) {
++		zram_sddc_manager_put(sddc);
++		return;
++	}
++	zram_sddc_slot_lock(zram, index);
++	zram_sddc_job_key_locked(zram, index, &key);
++	zram_sddc_slot_unlock(zram, index);
++	zram_sddc_queue_observation(zram, &key);
++	zram_sddc_manager_put(sddc);
++}
++
++bool zram_sddc_slot_allocated_locked(struct zram *zram, u32 index)
++{
++	struct zram_sddc *sddc = zram->sddc;
++
++	return sddc && index < sddc->nr_slots &&
++		zram_sddc_state_load_locked(sddc, index);
++}
++
++bool zram_sddc_slot_managed_locked(struct zram *zram, u32 index)
++{
++	return zram_sddc_slot_allocated_locked(zram, index);
++}
++
++bool zram_sddc_accounted_size_locked(struct zram *zram, u32 index,
++		size_t *size)
++{
++	struct zram_sddc *sddc = zram->sddc;
++	struct zram_sddc_slot_state *state;
++
++	if (!sddc || index >= sddc->nr_slots)
++		return false;
++	state = zram_sddc_state_load_locked(sddc, index);
++	if (!state)
++		return false;
++	*size = state->accounted_size;
++	return true;
++}
++
++void zram_sddc_snapshot_locked(struct zram *zram, u32 index,
++		struct zram_sddc_snapshot *snapshot)
++{
++	struct zram_sddc *sddc = zram->sddc;
++	struct zram_sddc_slot_state *state;
++
++	memset(snapshot, 0, sizeof(*snapshot));
++	if (!sddc || index >= sddc->nr_slots)
++		return;
++	snapshot->mutation_seq = sddc->mutation_seq[index];
++	state = zram_sddc_state_load_locked(sddc, index);
++	if (!state)
++		return;
++	snapshot->ref = state->ref;
++	snapshot->kind = state->kind;
++}
++
++bool zram_sddc_snapshot_matches_locked(struct zram *zram, u32 index,
++		const struct zram_sddc_snapshot *snapshot)
++{
++	struct zram_sddc_snapshot current_snapshot;
++
++	zram_sddc_snapshot_locked(zram, index, &current_snapshot);
++	return current_snapshot.mutation_seq == snapshot->mutation_seq &&
++		current_snapshot.kind == snapshot->kind &&
++		zram_sddc_cookie_equal(&current_snapshot.ref, &snapshot->ref);
++}
++
++static bool zram_sddc_delta_header_valid(
++		const struct zram_sddc_ref *ref,
++		const struct zram_sddc_delta_header *header, u32 wire_size)
++{
++	if (!ref || !header || wire_size <= sizeof(*header) ||
++	    wire_size > PAGE_SIZE)
++		return false;
++	if (le32_to_cpu(header->magic) != ZRAM_SDDC_DELTA_MAGIC ||
++	    le16_to_cpu(header->version) != ZRAM_SDDC_DELTA_VERSION ||
++	    le16_to_cpu(header->header_size) != sizeof(*header) ||
++	    le32_to_cpu(header->ref_size) != ref->size ||
++	    le32_to_cpu(header->target_size) < ZRAM_SDDC_SAMPLE_SIZE ||
++	    le32_to_cpu(header->target_size) > PAGE_SIZE)
++		return false;
++	return le32_to_cpu(header->ref_id) == ref->cookie.id &&
++		le32_to_cpu(header->ref_generation) == ref->cookie.generation;
++}
++
++static int zram_sddc_restore(struct zram_sddc *sddc,
++				struct zram_sddc_ref *ref,
++				enum zram_sddc_kind kind, const void *wire,
++				u32 wire_size, void *dst, size_t *size,
++				bool full_page)
++{
++	const struct zram_sddc_delta_header *header = wire;
++	struct zcomp *comp = NULL;
++	struct zcomp_strm *zstrm = NULL;
++	unsigned int stream_size;
++	size_t output_size;
++	void *ref_data;
++	bool delta;
++	int ret = 0;
++
++	if (!ref->handle)
++		return -EIO;
++	delta = kind == ZRAM_SDDC_DELTA;
++	if (!delta && kind != ZRAM_SDDC_REF && kind != ZRAM_SDDC_ALIAS)
++		return -EIO;
++	if (delta && !zram_sddc_delta_header_valid(ref, header, wire_size))
++		return -EIO;
++
++	if (delta || (full_page && ref->size != PAGE_SIZE)) {
++		comp = sddc->zram->comps[ref->prio];
++		if (!comp || (delta && !zcomp_supports_delta(comp)))
++			return -EIO;
++		zstrm = zcomp_stream_get(comp);
++	}
++
++	ref_data = zs_map_object(sddc->zram->mem_pool, ref->handle, ZS_MM_RO);
++	if (!delta) {
++		if (zstrm)
++			ret = zcomp_decompress(zstrm, ref_data, ref->size, dst);
++		else
++			memcpy(dst, ref_data, ref->size);
++		zs_unmap_object(sddc->zram->mem_pool, ref->handle);
++		output_size = full_page ? PAGE_SIZE : ref->size;
++		goto out;
++	}
++
++	stream_size = PAGE_SIZE;
++	ret = zcomp_decompress_delta(zstrm, (const u8 *)wire + sizeof(*header),
++				     wire_size - sizeof(*header), ref_data,
++				     ref->size, zstrm->buffer, &stream_size);
++	zs_unmap_object(sddc->zram->mem_pool, ref->handle);
++	if (ret || stream_size != le32_to_cpu(header->target_size)) {
++		ret = -EIO;
++		goto out;
++	}
++
++	if (!full_page) {
++		memcpy(dst, zstrm->buffer, stream_size);
++		output_size = stream_size;
++	} else if (stream_size == PAGE_SIZE) {
++		memcpy(dst, zstrm->buffer, PAGE_SIZE);
++		output_size = PAGE_SIZE;
++	} else {
++		ret = zcomp_decompress(zstrm, zstrm->buffer, stream_size, dst);
++		output_size = PAGE_SIZE;
++	}
++
++out:
++	if (zstrm)
++		zcomp_stream_put(comp);
++	if (ret)
++		return -EIO;
++	*size = output_size;
++	return 0;
++}
++
++static int zram_sddc_capture_locked(struct zram_sddc *sddc, u32 index,
++		const struct zram_sddc_snapshot *expected,
++		enum zram_sddc_kind *kind, struct zram_sddc_ref **ref,
++		void *wire, u32 *wire_size)
++{
++	struct zram_sddc_slot_state *state;
++	struct zram *zram = sddc->zram;
++	size_t object_size;
++	void *src;
++
++	if (index >= sddc->nr_slots)
++		return -EAGAIN;
++	state = zram_sddc_state_load_locked(sddc, index);
++	if (expected &&
++	    (sddc->mutation_seq[index] != expected->mutation_seq ||
++	     !state || state->kind != expected->kind ||
++	     !zram_sddc_cookie_equal(&state->ref, &expected->ref)))
++		return -EAGAIN;
++	if (!state)
++		return -EAGAIN;
++	if (zram_sddc_test_flag(zram, index, ZRAM_WB) ||
++	    (!expected && zram_sddc_test_flag(zram, index, ZRAM_UNDER_WB)))
++		return -EAGAIN;
++
++	*kind = state->kind;
++	*ref = zram_sddc_ref_pin(sddc, &state->ref);
++	if (!*ref)
++		return -EIO;
++	if ((*ref)->size < ZRAM_SDDC_SAMPLE_SIZE ||
++	    (*ref)->size > PAGE_SIZE || (*ref)->prio >= ZRAM_MAX_COMPS) {
++		zram_sddc_ref_put(*ref);
++		*ref = NULL;
++		return -EIO;
++	}
++
++	*wire_size = 0;
++	object_size = zram_sddc_obj_size(zram, index);
++	if (*kind == ZRAM_SDDC_REF || *kind == ZRAM_SDDC_ALIAS) {
++		if (zram->table[index].handle || object_size) {
++			zram_sddc_ref_put(*ref);
++			*ref = NULL;
++			return -EIO;
++		}
++		return 0;
++	}
++	if (*kind != ZRAM_SDDC_DELTA) {
++		zram_sddc_ref_put(*ref);
++		*ref = NULL;
++		return -EIO;
++	}
++	if (!zram->table[index].handle ||
++	    object_size <= sizeof(struct zram_sddc_delta_header) ||
++	    object_size > PAGE_SIZE) {
++		zram_sddc_ref_put(*ref);
++		*ref = NULL;
++		return -EIO;
++	}
++
++	*wire_size = object_size;
++	src = zs_map_object(zram->mem_pool, zram->table[index].handle, ZS_MM_RO);
++	memcpy(wire, src, *wire_size);
++	zs_unmap_object(zram->mem_pool, zram->table[index].handle);
++	return 0;
++}
++
++int zram_sddc_read_page(struct zram *zram, struct page *page, u32 index)
++{
++	struct zram_sddc_ref *ref = NULL;
++	struct zram_sddc *sddc;
++	enum zram_sddc_kind kind;
++	void *dst;
++	size_t size;
++	u32 wire_size;
++	int ret;
++
++	sddc = zram_sddc_manager_get(zram);
++	if (!sddc)
++		return -EIO;
++
++	dst = kmap_local_page(page);
++	zram_sddc_slot_lock(zram, index);
++	ret = zram_sddc_capture_locked(sddc, index, NULL, &kind, &ref, dst,
++					  &wire_size);
++	zram_sddc_slot_unlock(zram, index);
++	if (!ret)
++		ret = zram_sddc_restore(sddc, ref, kind, dst, wire_size, dst,
++					   &size, true);
++	kunmap_local(dst);
++	if (ret && ret != -EAGAIN)
++		atomic64_inc(&sddc->stats.decode_failures);
++	zram_sddc_ref_put(ref);
++	zram_sddc_manager_put(sddc);
++	return ret;
++}
++
++int zram_sddc_flatten(struct zram *zram, u32 index,
++			 const struct zram_sddc_snapshot *snapshot,
++			 void *dst, size_t *size)
++{
++	struct zram_sddc_ref *ref = NULL;
++	struct zram_sddc *sddc;
++	enum zram_sddc_kind kind;
++	u32 wire_size;
++	int ret;
++
++	if (!zram || !snapshot || !dst || !size)
++		return -EINVAL;
++	sddc = zram_sddc_manager_get(zram);
++	if (!sddc)
++		return -EAGAIN;
++
++	zram_sddc_slot_lock(zram, index);
++	ret = zram_sddc_capture_locked(sddc, index, snapshot, &kind, &ref,
++					  dst, &wire_size);
++	zram_sddc_slot_unlock(zram, index);
++	if (ret) {
++		if (ret != -EAGAIN)
++			atomic64_inc(&sddc->stats.decode_failures);
++		goto out;
++	}
++
++	ret = zram_sddc_restore(sddc, ref, kind, dst, wire_size, dst, size,
++				   false);
++	if (ret)
++		atomic64_inc(&sddc->stats.decode_failures);
++
++out:
++	if (ret && ret != -EAGAIN)
++		atomic64_inc(&sddc->stats.flatten_failures);
++	zram_sddc_ref_put(ref);
++	zram_sddc_manager_put(sddc);
++	return ret;
++}
++
++void zram_sddc_get_stats(struct zram *zram,
++		struct zram_sddc_stats_snapshot *stats)
++{
++	struct zram_sddc *sddc;
++
++	if (!stats)
++		return;
++	memset(stats, 0, sizeof(*stats));
++	if (!zram)
++		return;
++	sddc = zram_sddc_manager_get(zram);
++	if (!sddc)
++		return;
++
++	stats->enabled = true;
++	stats->queued = atomic64_read(&sddc->stats.queued);
++	stats->coalesced = atomic64_read(&sddc->stats.coalesced);
++	stats->dropped = atomic64_read(&sddc->stats.dropped);
++	stats->ineligible = atomic64_read(&sddc->stats.ineligible);
++	stats->shutdown_discarded =
++		atomic64_read(&sddc->stats.shutdown_discarded);
++	stats->worker_runs = atomic64_read(&sddc->stats.worker_runs);
++	stats->observed = atomic64_read(&sddc->stats.observed);
++	stats->stale = atomic64_read(&sddc->stats.stale);
++	stats->indexed = atomic64_read(&sddc->stats.indexed);
++	stats->refs = atomic64_read(&sddc->stats.refs);
++	stats->ref_bytes = atomic64_read(&sddc->stats.ref_bytes);
++	stats->aliases = atomic64_read(&sddc->stats.aliases);
++	stats->deltas = atomic64_read(&sddc->stats.deltas);
++	stats->delta_bytes = atomic64_read(&sddc->stats.delta_bytes);
++	stats->alias_attempts = atomic64_read(&sddc->stats.alias_attempts);
++	stats->alias_hits = atomic64_read(&sddc->stats.alias_hits);
++	stats->delta_attempts = atomic64_read(&sddc->stats.delta_attempts);
++	stats->delta_hits = atomic64_read(&sddc->stats.delta_hits);
++	stats->delta_matches = atomic64_read(&sddc->stats.delta_matches);
++	stats->delta_small_rejects =
++		atomic64_read(&sddc->stats.delta_small_rejects);
++	stats->delta_no_gain = atomic64_read(&sddc->stats.delta_no_gain);
++	stats->delta_match_bytes_max =
++		atomic64_read(&sddc->stats.delta_match_bytes_max);
++	stats->saved_bytes = atomic64_read(&sddc->stats.saved_bytes);
++	stats->saved_bytes_total =
++		atomic64_read(&sddc->stats.saved_bytes_total);
++	stats->conversion_failures =
++		atomic64_read(&sddc->stats.conversion_failures);
++	stats->decode_failures = atomic64_read(&sddc->stats.decode_failures);
++	stats->flatten_failures = atomic64_read(&sddc->stats.flatten_failures);
++	stats->limit_rejects = atomic64_read(&sddc->stats.limit_rejects);
++	stats->pending_max = atomic64_read(&sddc->stats.pending_max);
++	spin_lock(&sddc->state_lock);
++	stats->pending = sddc->pending;
++	spin_unlock(&sddc->state_lock);
++	zram_sddc_manager_put(sddc);
++}
++
++void zram_sddc_queue_observation(struct zram *zram,
++		const struct zram_sddc_job_key *key)
++{
++	struct zram_sddc *sddc;
++	u32 index;
++	unsigned int first_work;
++	unsigned int i;
++
++	if (!zram || !key || !key->handle ||
++	    key->size < ZRAM_SDDC_SAMPLE_SIZE || key->size > PAGE_SIZE)
++		return;
++	sddc = zram_sddc_manager_get(zram);
++	if (!sddc)
++		return;
++	index = key->index;
++	if (index >= sddc->nr_slots) {
++		atomic64_inc(&sddc->stats.dropped);
++		goto put_manager;
++	}
++
++	spin_lock(&sddc->state_lock);
++	if (READ_ONCE(sddc->stopping))
++		goto reject_locked;
++	if (!zram_sddc_observe_mark_locked(sddc, index))
++		goto put_locked;
++	atomic64_inc(&sddc->stats.queued);
++	if (!zram_sddc_observe_activate_locked(sddc))
++		goto put_locked;
++
++	/* One active manager token belongs to the newly scheduled drain. */
++	first_work = sddc->observe_work_cursor++ %
++		ZRAM_SDDC_OBSERVE_WORKS;
++	for (i = 0; i < ZRAM_SDDC_OBSERVE_WORKS; i++) {
++		unsigned int work_index = (first_work + i) %
++			ZRAM_SDDC_OBSERVE_WORKS;
++
++		spin_lock(&sddc->active_lock);
++		atomic_inc(&sddc->active_ops);
++		spin_unlock(&sddc->active_lock);
++		if (queue_work(sddc->workqueue,
++				&sddc->observe_work[work_index].work)) {
++			sddc->observe_work_cursor = (work_index + 1) %
++				ZRAM_SDDC_OBSERVE_WORKS;
++			break;
++		}
++		zram_sddc_manager_put(sddc);
++	}
++	spin_unlock(&sddc->state_lock);
++	zram_sddc_manager_put(sddc);
++	return;
++
++put_locked:
++	spin_unlock(&sddc->state_lock);
++	goto put_manager;
++reject_locked:
++	spin_unlock(&sddc->state_lock);
++	atomic64_inc(&sddc->stats.dropped);
++put_manager:
++	zram_sddc_manager_put(sddc);
++}
++
++#if IS_ENABLED(CONFIG_ZRAM_SDDC_KUNIT_TEST)
++
++#define ZRAM_SDDC_TEST_SLOTS	2
++
++struct zram_sddc_test_ctx {
++	struct zram zram;
++	struct zram_sddc sddc;
++	u64 mutation_seq[ZRAM_SDDC_TEST_SLOTS];
++	struct zram_table_entry table[ZRAM_SDDC_TEST_SLOTS];
++	struct zcomp comp;
++};
++
++static int zram_sddc_test_compress_delta(struct zcomp_strm *zstrm,
++		const void *ref, unsigned int ref_len, const void *src,
++		unsigned int src_len, void *dst, unsigned int *dst_len,
++		unsigned int out_limit)
++{
++	return -EOPNOTSUPP;
++}
++
++static int zram_sddc_test_decompress_delta(struct zcomp_strm *zstrm,
++		const void *src, unsigned int src_len, const void *ref,
++		unsigned int ref_len, void *dst, unsigned int *dst_len)
++{
++	return -EOPNOTSUPP;
++}
++
++static const struct zcomp_backend_ops zram_sddc_test_ops = {
++	.compress_delta = zram_sddc_test_compress_delta,
++	.decompress_delta = zram_sddc_test_decompress_delta,
++};
++
++static int zram_sddc_state_test_init(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx;
++
++	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	ctx->zram.table = ctx->table;
++	ctx->zram.sddc = &ctx->sddc;
++	ctx->comp.ops = &zram_sddc_test_ops;
++	ctx->zram.comps[ZRAM_PRIMARY_COMP] = &ctx->comp;
++	spin_lock_init(&ctx->zram.sddc_lock);
++
++	ctx->sddc.zram = &ctx->zram;
++	ctx->sddc.mutation_seq = ctx->mutation_seq;
++	ctx->sddc.nr_slots = ZRAM_SDDC_TEST_SLOTS;
++	spin_lock_init(&ctx->sddc.state_lock);
++	spin_lock_init(&ctx->sddc.index_lock);
++	spin_lock_init(&ctx->sddc.active_lock);
++	ida_init(&ctx->sddc.ref_ids);
++	xa_init(&ctx->sddc.refs);
++	xa_init(&ctx->sddc.slot_states);
++	atomic_set(&ctx->sddc.active_ops, 0);
++	init_waitqueue_head(&ctx->sddc.active_wait);
++	ctx->sddc.observe_pending = bitmap_zalloc(ZRAM_SDDC_TEST_SLOTS,
++			GFP_KERNEL);
++	if (!ctx->sddc.observe_pending)
++		return -ENOMEM;
++
++	test->priv = ctx;
++	return 0;
++}
++
++static void zram_sddc_state_test_exit(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_slot_state *state;
++	unsigned long index;
++
++	if (!ctx)
++		return;
++
++	bitmap_free(ctx->sddc.observe_pending);
++	xa_for_each(&ctx->sddc.slot_states, index, state) {
++		state = xa_erase(&ctx->sddc.slot_states, index);
++		if (state && state != XA_ZERO_ENTRY && !xa_is_err(state))
++			kfree(state);
++	}
++	xa_destroy(&ctx->sddc.slot_states);
++	xa_destroy(&ctx->sddc.refs);
++	ida_destroy(&ctx->sddc.ref_ids);
++}
++
++static struct zram_sddc_slot_state *
++zram_sddc_test_install_state(struct zram_sddc_test_ctx *ctx, u32 index,
++		enum zram_sddc_kind kind)
++{
++	struct zram_sddc_slot_state *state;
++	int ret;
++
++	state = kzalloc(sizeof(*state), GFP_KERNEL);
++	if (!state)
++		return NULL;
++	state->kind = kind;
++	ret = xa_insert(&ctx->sddc.slot_states, index, state, GFP_KERNEL);
++	if (ret) {
++		kfree(state);
++		return NULL;
++	}
++	return state;
++}
++
++static void zram_sddc_observe_bitmap_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	u32 index;
++
++	ctx->sddc.observe_worker_active = true;
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_observe_mark_locked(&ctx->sddc, 1));
++	KUNIT_EXPECT_FALSE(test,
++		zram_sddc_observe_mark_locked(&ctx->sddc, 1));
++	KUNIT_EXPECT_EQ(test, ctx->sddc.pending, 1U);
++	KUNIT_EXPECT_EQ(test,
++		atomic64_read(&ctx->sddc.stats.coalesced), (s64)1);
++
++	KUNIT_ASSERT_TRUE(test,
++		zram_sddc_observe_take_locked(&ctx->sddc, &index));
++	KUNIT_EXPECT_EQ(test, index, (u32)1);
++	KUNIT_EXPECT_EQ(test, ctx->sddc.pending, 0U);
++	KUNIT_EXPECT_FALSE(test, test_bit(1, ctx->sddc.observe_pending));
++	/* Taking the last bit does not end the callback.  The worker commits its
++	 * active-to-idle transition after observing the empty queue under lock.
++	 */
++	KUNIT_EXPECT_TRUE(test, ctx->sddc.observe_worker_active);
++	KUNIT_EXPECT_FALSE(test,
++		zram_sddc_observe_take_locked(&ctx->sddc, &index));
++	KUNIT_EXPECT_TRUE(test, ctx->sddc.observe_worker_active);
++	zram_sddc_observe_deactivate_locked(&ctx->sddc, 0);
++	KUNIT_EXPECT_FALSE(test, ctx->sddc.observe_worker_active);
++	KUNIT_EXPECT_EQ(test, ctx->sddc.observe_work_cursor, 1U);
++	KUNIT_EXPECT_TRUE(test, zram_sddc_observe_activate_locked(&ctx->sddc));
++	KUNIT_EXPECT_FALSE(test, zram_sddc_observe_activate_locked(&ctx->sddc));
++
++	/* The cursor wraps and a second request for a consumed slot is
++	 * represented by a new bit, not by an extra queue object. */
++	ctx->sddc.observe_worker_active = true;
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_observe_mark_locked(&ctx->sddc, 0));
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_observe_mark_locked(&ctx->sddc, 1));
++	KUNIT_ASSERT_TRUE(test,
++		zram_sddc_observe_take_locked(&ctx->sddc, &index));
++	KUNIT_EXPECT_EQ(test, index, (u32)0);
++	KUNIT_ASSERT_TRUE(test,
++		zram_sddc_observe_take_locked(&ctx->sddc, &index));
++	KUNIT_EXPECT_EQ(test, index, (u32)1);
++	KUNIT_EXPECT_EQ(test, ctx->sddc.pending, 0U);
++}
++
++static void zram_sddc_observe_discard_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_observe_mark_locked(&ctx->sddc, 0));
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_observe_mark_locked(&ctx->sddc, 1));
++	KUNIT_EXPECT_EQ(test,
++		zram_sddc_observe_discard_locked(&ctx->sddc), 2U);
++	KUNIT_EXPECT_EQ(test, ctx->sddc.pending, 0U);
++	KUNIT_EXPECT_TRUE(test,
++		bitmap_empty(ctx->sddc.observe_pending, ZRAM_SDDC_TEST_SLOTS));
++	KUNIT_EXPECT_EQ(test,
++		atomic64_read(&ctx->sddc.stats.shutdown_discarded), (s64)2);
++}
++
++static void zram_sddc_index_quality_test(struct kunit *test)
++{
++	struct zram_sddc_ref ref = { };
++
++	refcount_set(&ref.refs, 3);
++	KUNIT_EXPECT_EQ(test, zram_sddc_ref_count_without_pin(&ref), 2U);
++	refcount_set(&ref.refs, 1);
++	KUNIT_EXPECT_EQ(test, zram_sddc_ref_count_without_pin(&ref), 0U);
++
++	/* Lower reference count and smaller payloads are the first eviction
++	 * candidates; a highly shared reference survives an exact tie. */
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_index_candidate_worse(4, 512, 3, 1024));
++	KUNIT_EXPECT_FALSE(test,
++		zram_sddc_index_candidate_worse(3, 512, 4, 256));
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_index_candidate_worse(3, 512, 3, 256));
++	KUNIT_EXPECT_FALSE(test,
++		zram_sddc_index_candidate_worse(3, 512, 3, 1024));
++	KUNIT_EXPECT_FALSE(test,
++		zram_sddc_index_candidate_worse(3, 512, 3, 512));
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_index_candidate_worse(2, 512, 2, 512));
++}
++
++static void zram_sddc_similarity_test(struct kunit *test)
++{
++	u8 target[64];
++	u8 shifted[72];
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(target); i++)
++		target[i] = i;
++	memset(shifted, 0xa5, sizeof(shifted));
++	memcpy(shifted + 8, target, sizeof(target));
++
++	KUNIT_EXPECT_EQ(test,
++		zram_sddc_match_bytes(target, sizeof(target), target,
++			sizeof(target), ZRAM_SDDC_SAMPLE_HEAD),
++		(u32)sizeof(target));
++	KUNIT_EXPECT_EQ(test,
++		zram_sddc_match_bytes(target, sizeof(target), target,
++			sizeof(target), ZRAM_SDDC_SAMPLE_TAIL),
++		(u32)sizeof(target));
++	KUNIT_EXPECT_EQ(test,
++		zram_sddc_match_bytes(target, sizeof(target), shifted,
++			sizeof(shifted), ZRAM_SDDC_SAMPLE_TAIL),
++		(u32)sizeof(target));
++	KUNIT_EXPECT_EQ(test,
++		zram_sddc_match_bytes(target, sizeof(target), shifted,
++			sizeof(shifted), ZRAM_SDDC_SAMPLE_HEAD |
++			ZRAM_SDDC_SAMPLE_TAIL),
++		(u32)sizeof(target));
++	KUNIT_EXPECT_EQ(test,
++		zram_sddc_match_bytes(target, sizeof(target), shifted,
++			sizeof(shifted), ZRAM_SDDC_SAMPLE_HEAD), 0U);
++}
++
++static void zram_sddc_sample_eligibility_test(struct kunit *test)
++{
++	KUNIT_EXPECT_FALSE(test,
++		zram_sddc_sample_eligible(ZRAM_SDDC_INDEX_MIN_SIZE));
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_sample_eligible(ZRAM_SDDC_INDEX_MIN_SIZE + 1));
++	KUNIT_EXPECT_TRUE(test, zram_sddc_sample_eligible(PAGE_SIZE));
++	KUNIT_EXPECT_FALSE(test, zram_sddc_sample_eligible(PAGE_SIZE + 1));
++}
++
++static void zram_sddc_delta_admission_test(struct kunit *test)
++{
++	KUNIT_EXPECT_FALSE(test,
++		zram_sddc_delta_target_eligible(ZRAM_SDDC_INDEX_MIN_SIZE + 1));
++	KUNIT_EXPECT_FALSE(test,
++		zram_sddc_delta_target_eligible(ZRAM_SDDC_DELTA_MIN_SIZE));
++	KUNIT_EXPECT_TRUE(test,
++		zram_sddc_delta_target_eligible(ZRAM_SDDC_DELTA_MIN_SIZE + 1));
++}
++
++static bool zram_sddc_test_job_matches(struct zram_sddc_test_ctx *ctx,
++		const struct zram_sddc_job_key *key)
++{
++	bool matches;
++
++	zram_sddc_slot_lock(&ctx->zram, key->index);
++	matches = zram_sddc_job_matches_locked(&ctx->sddc, key, false);
++	zram_sddc_slot_unlock(&ctx->zram, key->index);
++	return matches;
++}
++
++static bool zram_sddc_test_snapshot_matches(
++		struct zram_sddc_test_ctx *ctx, u32 index,
++		const struct zram_sddc_snapshot *snapshot)
++{
++	bool matches;
++
++	zram_sddc_slot_lock(&ctx->zram, index);
++	matches = zram_sddc_snapshot_matches_locked(&ctx->zram, index,
++			snapshot);
++	zram_sddc_slot_unlock(&ctx->zram, index);
++	return matches;
++}
++
++static void zram_sddc_ref_publish_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_ref ref = {
++		.sddc = &ctx->sddc,
++		.cookie = { .id = 17, .generation = 5 },
++	};
++	int ret;
++
++	ret = xa_reserve(&ctx->sddc.refs, ref.cookie.id, GFP_KERNEL);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_NULL(test, xa_load(&ctx->sddc.refs, ref.cookie.id));
++	KUNIT_ASSERT_FALSE(test, xa_empty(&ctx->sddc.refs));
++
++	KUNIT_EXPECT_TRUE(test, zram_sddc_ref_publish(&ctx->sddc, &ref));
++	KUNIT_EXPECT_PTR_EQ(test, xa_load(&ctx->sddc.refs, ref.cookie.id),
++			&ref);
++	KUNIT_EXPECT_FALSE(test, zram_sddc_ref_publish(&ctx->sddc, &ref));
++	KUNIT_EXPECT_PTR_EQ(test, xa_load(&ctx->sddc.refs, ref.cookie.id),
++			&ref);
++	xa_erase(&ctx->sddc.refs, ref.cookie.id);
++}
++
++static void zram_sddc_ref_generation_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_ref ref = {
++		.sddc = &ctx->sddc,
++		.cookie = { .id = 23, .generation = 11 },
++	};
++	struct zram_sddc_cookie stale = ref.cookie;
++	struct zram_sddc_ref *pinned;
++	int ret;
++
++	refcount_set(&ref.refs, 1);
++	ret = xa_reserve(&ctx->sddc.refs, ref.cookie.id, GFP_KERNEL);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_TRUE(test,
++			zram_sddc_ref_publish(&ctx->sddc, &ref));
++
++	stale.generation++;
++	KUNIT_EXPECT_NULL(test, zram_sddc_ref_pin(&ctx->sddc, &stale));
++	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 1U);
++
++	pinned = zram_sddc_ref_pin(&ctx->sddc, &ref.cookie);
++	KUNIT_ASSERT_PTR_EQ(test, pinned, &ref);
++	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 2U);
++	zram_sddc_ref_put(pinned);
++	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 1U);
++	xa_erase(&ctx->sddc.refs, ref.cookie.id);
++}
++
++static void zram_sddc_snapshot_identity_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_snapshot snapshot;
++
++	ctx->mutation_seq[0] = 41;
++	state = zram_sddc_test_install_state(ctx, 0,
++			ZRAM_SDDC_DELTA);
++	KUNIT_ASSERT_NOT_NULL(test, state);
++	state->ref.id = 9;
++	state->ref.generation = 3;
++	zram_sddc_slot_lock(&ctx->zram, 0);
++	zram_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
++	zram_sddc_slot_unlock(&ctx->zram, 0);
++	KUNIT_ASSERT_TRUE(test,
++			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
++
++	ctx->mutation_seq[0]++;
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
++	ctx->mutation_seq[0] = snapshot.mutation_seq;
++	state->kind = ZRAM_SDDC_ALIAS;
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
++	state->kind = snapshot.kind;
++	state->ref.generation++;
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
++	state->ref = snapshot.ref;
++	state->ref.id++;
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
++	state->ref = snapshot.ref;
++	KUNIT_EXPECT_TRUE(test,
++			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
++}
++
++static void zram_sddc_slot_owner_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_ref ref = {
++		.sddc = &ctx->sddc,
++		.cookie = { .id = 31, .generation = 7 },
++	};
++	enum zram_sddc_kind kind;
++	int ret;
++
++	refcount_set(&ref.refs, 3);
++	ret = xa_reserve(&ctx->sddc.refs, ref.cookie.id, GFP_KERNEL);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_TRUE(test,
++			zram_sddc_ref_publish(&ctx->sddc, &ref));
++	ctx->mutation_seq[0] = 12;
++	state = zram_sddc_test_install_state(ctx, 0,
++			ZRAM_SDDC_DELTA);
++	KUNIT_ASSERT_NOT_NULL(test, state);
++	state->ref = ref.cookie;
++	state->accounted_size = 80;
++	state->saved_size = 64;
++	atomic64_set(&ctx->sddc.stats.deltas, 1);
++	atomic64_set(&ctx->sddc.stats.delta_bytes, 80);
++	atomic64_set(&ctx->sddc.stats.saved_bytes, 64);
++
++	zram_sddc_slot_lock(&ctx->zram, 0);
++	kind = zram_sddc_slot_free_locked(&ctx->zram, 0);
++	zram_sddc_slot_unlock(&ctx->zram, 0);
++	KUNIT_EXPECT_EQ(test, kind, ZRAM_SDDC_DELTA);
++	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 2U);
++	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.deltas),
++			(s64)0);
++	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.delta_bytes),
++			(s64)0);
++	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.saved_bytes),
++			(s64)0);
++
++	zram_sddc_slot_lock(&ctx->zram, 0);
++	kind = zram_sddc_slot_free_locked(&ctx->zram, 0);
++	zram_sddc_slot_unlock(&ctx->zram, 0);
++	KUNIT_EXPECT_EQ(test, kind, ZRAM_SDDC_NONE);
++	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 2U);
++	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.delta_bytes),
++			(s64)0);
++	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.saved_bytes),
++			(s64)0);
++	xa_erase(&ctx->sddc.refs, ref.cookie.id);
++}
++
++static void zram_sddc_stale_job_key_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_job_key key = {
++		.mutation_seq = 19,
++		.handle = 0x1234,
++		.index = 0,
++		.size = 512,
++		.prio = ZRAM_PRIMARY_COMP,
++	};
++
++	ctx->mutation_seq[0] = key.mutation_seq;
++	ctx->table[0].handle = key.handle;
++	zram_sddc_set_obj_size(&ctx->zram, 0, key.size);
++	KUNIT_ASSERT_TRUE(test, zram_sddc_test_job_matches(ctx, &key));
++
++	ctx->mutation_seq[0]++;
++	KUNIT_EXPECT_FALSE(test, zram_sddc_test_job_matches(ctx, &key));
++	ctx->mutation_seq[0] = key.mutation_seq;
++	ctx->table[0].handle++;
++	KUNIT_EXPECT_FALSE(test, zram_sddc_test_job_matches(ctx, &key));
++	ctx->table[0].handle = key.handle;
++	KUNIT_ASSERT_NOT_NULL(test, zram_sddc_test_install_state(ctx,
++			0, ZRAM_SDDC_ALIAS));
++	KUNIT_EXPECT_FALSE(test, zram_sddc_test_job_matches(ctx, &key));
++}
++
++static void zram_sddc_sparse_reservation_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_snapshot snapshot;
++	u64 reservation_seq = 73;
++
++	ctx->mutation_seq[0] = reservation_seq;
++	KUNIT_ASSERT_TRUE(test, xa_empty(&ctx->sddc.slot_states));
++	zram_sddc_slot_lock(&ctx->zram, 0);
++	zram_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
++	zram_sddc_slot_unlock(&ctx->zram, 0);
++	KUNIT_EXPECT_EQ(test, snapshot.mutation_seq, (u64)73);
++	KUNIT_EXPECT_EQ(test, snapshot.kind, (u8)ZRAM_SDDC_NONE);
++
++	state = zram_sddc_state_prepare(&ctx->sddc, 0);
++	KUNIT_ASSERT_NOT_NULL(test, state);
++	KUNIT_EXPECT_FALSE(test, xa_empty(&ctx->sddc.slot_states));
++	KUNIT_EXPECT_NULL(test, xa_load(&ctx->sddc.slot_states, 0));
++	zram_sddc_slot_lock(&ctx->zram, 0);
++	KUNIT_EXPECT_EQ(test,
++		zram_sddc_slot_free_locked(&ctx->zram, 0),
++		ZRAM_SDDC_NONE);
++	zram_sddc_slot_unlock(&ctx->zram, 0);
++	/* A free must leave an in-flight reservation for its owner to abort;
++	 * otherwise a later conversion could reuse it. */
++	KUNIT_EXPECT_FALSE(test, xa_empty(&ctx->sddc.slot_states));
++	KUNIT_EXPECT_TRUE(test, zram_sddc_state_identity_changed(&ctx->sddc,
++			0, reservation_seq));
++	zram_sddc_state_abort(&ctx->sddc, 0, reservation_seq, state);
++	KUNIT_EXPECT_TRUE(test, xa_empty(&ctx->sddc.slot_states));
++}
++
++static void zram_sddc_reservation_job_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_job_key key = {
++		.index = 0,
++		.mutation_seq = 91,
++		.handle = 0x4321,
++		.size = 512,
++		.prio = ZRAM_PRIMARY_COMP,
++	};
++
++	ctx->mutation_seq[0] = key.mutation_seq;
++	ctx->table[0].handle = key.handle;
++	zram_sddc_set_obj_size(&ctx->zram, 0, key.size);
++	state = zram_sddc_state_prepare(&ctx->sddc, key.index);
++	KUNIT_ASSERT_NOT_NULL(test, state);
++
++	zram_sddc_slot_lock(&ctx->zram, key.index);
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_job_matches_locked(&ctx->sddc, &key, false));
++	KUNIT_EXPECT_TRUE(test,
++			zram_sddc_job_matches_locked(&ctx->sddc, &key, true));
++	zram_sddc_slot_unlock(&ctx->zram, key.index);
++	KUNIT_EXPECT_FALSE(test, zram_sddc_state_identity_changed(&ctx->sddc,
++			key.index, key.mutation_seq));
++
++	zram_sddc_state_abort(&ctx->sddc, key.index, key.mutation_seq, state);
++}
++
++static void zram_sddc_mutation_wrap_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++
++	ctx->mutation_seq[0] = U64_MAX;
++	zram_sddc_mutation_advance_locked(&ctx->sddc, 0);
++	KUNIT_EXPECT_EQ(test, ctx->mutation_seq[0], (u64)1);
++	zram_sddc_mutation_advance_locked(&ctx->sddc, 0);
++	KUNIT_EXPECT_EQ(test, ctx->mutation_seq[0], (u64)2);
++}
++
++static void zram_sddc_flatten_snapshot_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc_slot_state *state;
++	struct zram_sddc_snapshot snapshot;
++	void *dst;
++	size_t size = 123;
++	int ret;
++
++	ctx->mutation_seq[0] = 27;
++	state = zram_sddc_test_install_state(ctx, 0,
++			ZRAM_SDDC_ALIAS);
++	KUNIT_ASSERT_NOT_NULL(test, state);
++	state->ref.id = 2;
++	state->ref.generation = 4;
++	zram_sddc_slot_lock(&ctx->zram, 0);
++	zram_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
++	zram_sddc_slot_unlock(&ctx->zram, 0);
++	ctx->mutation_seq[0]++;
++	dst = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, dst);
++
++	ret = zram_sddc_flatten(&ctx->zram, 0, &snapshot, dst, &size);
++	KUNIT_EXPECT_EQ(test, ret, -EAGAIN);
++	KUNIT_EXPECT_EQ(test, size, (size_t)123);
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
++	KUNIT_EXPECT_EQ(test,
++			atomic64_read(&ctx->sddc.stats.flatten_failures), (s64)0);
++
++	zram_sddc_slot_lock(&ctx->zram, 0);
++	zram_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
++	zram_sddc_slot_unlock(&ctx->zram, 0);
++	ret = zram_sddc_flatten(&ctx->zram, 0, &snapshot, dst, &size);
++	KUNIT_EXPECT_EQ(test, ret, -EIO);
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
++	KUNIT_EXPECT_EQ(test,
++			atomic64_read(&ctx->sddc.stats.decode_failures), (s64)1);
++	KUNIT_EXPECT_EQ(test,
++			atomic64_read(&ctx->sddc.stats.flatten_failures), (s64)1);
++}
++
++static void zram_sddc_delta_header_test(struct kunit *test)
++{
++	struct zram_sddc_ref ref = {
++		.cookie = { .id = 37, .generation = 13 },
++		.size = 768,
++	};
++	struct zram_sddc_delta_header header = {
++		.magic = cpu_to_le32(ZRAM_SDDC_DELTA_MAGIC),
++		.version = cpu_to_le16(ZRAM_SDDC_DELTA_VERSION),
++		.header_size = cpu_to_le16(sizeof(header)),
++		.ref_id = cpu_to_le32(ref.cookie.id),
++		.ref_generation = cpu_to_le32(ref.cookie.generation),
++		.ref_size = cpu_to_le32(ref.size),
++		.target_size = cpu_to_le32(640),
++	};
++	struct zram_sddc_delta_header bad;
++	u32 wire_size = sizeof(header) + 8;
++
++	KUNIT_ASSERT_TRUE(test,
++			zram_sddc_delta_header_valid(&ref, &header, wire_size));
++
++	bad = header;
++	bad.magic = cpu_to_le32(ZRAM_SDDC_DELTA_MAGIC ^ 1);
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_delta_header_valid(&ref, &bad, wire_size));
++	bad = header;
++	bad.version = cpu_to_le16(ZRAM_SDDC_DELTA_VERSION + 1);
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_delta_header_valid(&ref, &bad, wire_size));
++	bad = header;
++	bad.header_size = cpu_to_le16(sizeof(bad) - 1);
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_delta_header_valid(&ref, &bad, wire_size));
++	bad = header;
++	bad.ref_id = cpu_to_le32(ref.cookie.id + 1);
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_delta_header_valid(&ref, &bad, wire_size));
++	bad = header;
++	bad.ref_generation = cpu_to_le32(ref.cookie.generation + 1);
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_delta_header_valid(&ref, &bad, wire_size));
++	bad = header;
++	bad.ref_size = cpu_to_le32(ref.size + 1);
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_delta_header_valid(&ref, &bad, wire_size));
++	bad = header;
++	bad.target_size = 0;
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_delta_header_valid(&ref, &bad, wire_size));
++	bad = header;
++	bad.target_size = cpu_to_le32(PAGE_SIZE + 1);
++	KUNIT_EXPECT_FALSE(test,
++			zram_sddc_delta_header_valid(&ref, &bad, wire_size));
++	KUNIT_EXPECT_FALSE(test, zram_sddc_delta_header_valid(&ref, &header,
++			sizeof(header)));
++	KUNIT_EXPECT_FALSE(test, zram_sddc_delta_header_valid(&ref, &header,
++			PAGE_SIZE + 1));
++}
++
++static void zram_sddc_manager_admission_test(struct kunit *test)
++{
++	struct zram_sddc_test_ctx *ctx = test->priv;
++	struct zram_sddc *held;
++
++	held = zram_sddc_manager_get(&ctx->zram);
++	KUNIT_ASSERT_PTR_EQ(test, held, &ctx->sddc);
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 1);
++
++	spin_lock(&ctx->zram.sddc_lock);
++	WRITE_ONCE(ctx->sddc.stopping, true);
++	spin_unlock(&ctx->zram.sddc_lock);
++	KUNIT_EXPECT_NULL(test, zram_sddc_manager_get(&ctx->zram));
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 1);
++
++	zram_sddc_manager_put(held);
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
++	KUNIT_EXPECT_NULL(test, zram_sddc_manager_get(&ctx->zram));
++}
++
++static struct kunit_case zram_sddc_state_test_cases[] = {
++	KUNIT_CASE(zram_sddc_ref_publish_test),
++	KUNIT_CASE(zram_sddc_ref_generation_test),
++	KUNIT_CASE(zram_sddc_snapshot_identity_test),
++	KUNIT_CASE(zram_sddc_slot_owner_test),
++	KUNIT_CASE(zram_sddc_stale_job_key_test),
++	KUNIT_CASE(zram_sddc_sparse_reservation_test),
++	KUNIT_CASE(zram_sddc_reservation_job_test),
++	KUNIT_CASE(zram_sddc_mutation_wrap_test),
++	KUNIT_CASE(zram_sddc_flatten_snapshot_test),
++	KUNIT_CASE(zram_sddc_delta_header_test),
++	KUNIT_CASE(zram_sddc_manager_admission_test),
++	KUNIT_CASE(zram_sddc_observe_bitmap_test),
++	KUNIT_CASE(zram_sddc_observe_discard_test),
++	KUNIT_CASE(zram_sddc_index_quality_test),
++	KUNIT_CASE(zram_sddc_similarity_test),
++	KUNIT_CASE(zram_sddc_sample_eligibility_test),
++	KUNIT_CASE(zram_sddc_delta_admission_test),
++	{}
++};
++
++static struct kunit_suite zram_sddc_state_test_suite = {
++	.name = "zram-sddc-state",
++	.init = zram_sddc_state_test_init,
++	.exit = zram_sddc_state_test_exit,
++	.test_cases = zram_sddc_state_test_cases,
++};
++
++kunit_test_suite(zram_sddc_state_test_suite);
++
++#endif /* CONFIG_ZRAM_SDDC_KUNIT_TEST */
+diff --git a/drivers/block/zram/sddc/zram_sddc.h b/drivers/block/zram/sddc/zram_sddc.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..26b63ec3c27ba87edb58ad1c5d649ec047ae4757
+--- /dev/null
++++ b/drivers/block/zram/sddc/zram_sddc.h
+@@ -0,0 +1,173 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#ifndef _ZRAM_SDDC_H_
++#define _ZRAM_SDDC_H_
++
++#include <linux/kconfig.h>
++#include <linux/errno.h>
++#include <linux/string.h>
++#include <linux/types.h>
++
++struct zram_sddc;
++struct page;
++struct zram;
++
++enum zram_sddc_kind {
++	ZRAM_SDDC_NONE,
++	ZRAM_SDDC_REF,
++	ZRAM_SDDC_ALIAS,
++	ZRAM_SDDC_DELTA,
++};
++
++struct zram_sddc_cookie {
++	u32 id;
++	u32 generation;
++};
++
++struct zram_sddc_snapshot {
++	u64 mutation_seq;
++	struct zram_sddc_cookie ref;
++	u8 kind;
++};
++
++struct zram_sddc_job_key {
++	u64 mutation_seq;
++	unsigned long handle;
++	u32 index;
++	u32 size;
++	u8 prio;
++};
++
++struct zram_sddc_stats_snapshot {
++	u64 queued;
++	u64 coalesced;
++	u64 dropped;
++	u64 ineligible;
++	u64 shutdown_discarded;
++	u64 worker_runs;
++	u64 observed;
++	u64 stale;
++	u64 indexed;
++	u64 refs;
++	u64 ref_bytes;
++	u64 aliases;
++	u64 deltas;
++	u64 delta_bytes;
++	u64 alias_attempts;
++	u64 alias_hits;
++	u64 delta_attempts;
++	u64 delta_hits;
++	u64 delta_matches;
++	u64 delta_small_rejects;
++	u64 delta_no_gain;
++	u64 delta_match_bytes_max;
++	u64 saved_bytes;
++	u64 saved_bytes_total;
++	u64 conversion_failures;
++	u64 decode_failures;
++	u64 flatten_failures;
++	u64 limit_rejects;
++	u64 pending_max;
++	u32 pending;
++	bool enabled;
++};
++
++#if IS_ENABLED(CONFIG_ZRAM_SDDC)
++int zram_sddc_create(struct zram *zram, unsigned long nr_pages);
++void zram_sddc_stop(struct zram *zram);
++void zram_sddc_destroy(struct zram *zram);
++
++enum zram_sddc_kind zram_sddc_slot_free_locked(struct zram *zram,
++		u32 index);
++void zram_sddc_slot_stored_locked(struct zram *zram, u32 index);
++void zram_sddc_job_key_locked(struct zram *zram, u32 index,
++		struct zram_sddc_job_key *key);
++void zram_sddc_queue_observation(struct zram *zram,
++		const struct zram_sddc_job_key *key);
++void zram_sddc_requeue_observation(struct zram *zram, u32 index);
++bool zram_sddc_slot_allocated_locked(struct zram *zram, u32 index);
++bool zram_sddc_slot_managed_locked(struct zram *zram, u32 index);
++bool zram_sddc_accounted_size_locked(struct zram *zram, u32 index,
++		size_t *size);
++void zram_sddc_snapshot_locked(struct zram *zram, u32 index,
++		struct zram_sddc_snapshot *snapshot);
++bool zram_sddc_snapshot_matches_locked(struct zram *zram, u32 index,
++		const struct zram_sddc_snapshot *snapshot);
++int zram_sddc_read_page(struct zram *zram, struct page *page, u32 index);
++int zram_sddc_flatten(struct zram *zram, u32 index,
++		const struct zram_sddc_snapshot *snapshot, void *dst,
++		size_t *size);
++void zram_sddc_get_stats(struct zram *zram,
++		struct zram_sddc_stats_snapshot *stats);
++#else
++static inline int zram_sddc_create(struct zram *zram,
++		unsigned long nr_pages)
++{
++	return 0;
++}
++
++static inline void zram_sddc_stop(struct zram *zram) { }
++static inline void zram_sddc_destroy(struct zram *zram) { }
++static inline enum zram_sddc_kind
++zram_sddc_slot_free_locked(struct zram *zram, u32 index)
++{
++	return ZRAM_SDDC_NONE;
++}
++static inline void zram_sddc_slot_stored_locked(struct zram *zram,
++		u32 index) { }
++static inline void zram_sddc_job_key_locked(struct zram *zram, u32 index,
++		struct zram_sddc_job_key *key) { }
++static inline void zram_sddc_queue_observation(struct zram *zram,
++		const struct zram_sddc_job_key *key) { }
++static inline void zram_sddc_requeue_observation(struct zram *zram,
++		u32 index) { }
++static inline bool zram_sddc_slot_allocated_locked(struct zram *zram,
++		u32 index)
++{
++	return false;
++}
++
++static inline bool zram_sddc_slot_managed_locked(struct zram *zram,
++		u32 index)
++{
++	return false;
++}
++
++static inline bool zram_sddc_accounted_size_locked(struct zram *zram,
++		u32 index, size_t *size)
++{
++	return false;
++}
++
++static inline void zram_sddc_snapshot_locked(struct zram *zram, u32 index,
++		struct zram_sddc_snapshot *snapshot)
++{
++	memset(snapshot, 0, sizeof(*snapshot));
++}
++
++static inline bool zram_sddc_snapshot_matches_locked(struct zram *zram,
++		u32 index, const struct zram_sddc_snapshot *snapshot)
++{
++	return true;
++}
++
++static inline int zram_sddc_read_page(struct zram *zram,
++		struct page *page, u32 index)
++{
++	return -EAGAIN;
++}
++
++static inline int zram_sddc_flatten(struct zram *zram, u32 index,
++		const struct zram_sddc_snapshot *snapshot, void *dst,
++		size_t *size)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline void zram_sddc_get_stats(struct zram *zram,
++		struct zram_sddc_stats_snapshot *stats)
++{
++	memset(stats, 0, sizeof(*stats));
++}
++#endif
++
++#endif /* _ZRAM_SDDC_H_ */
+diff --git a/drivers/block/zram/sddc/zram_sddc_codec.c b/drivers/block/zram/sddc/zram_sddc_codec.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..754b4a0d703cac18c2f515c9956036ea2633d29b
+--- /dev/null
++++ b/drivers/block/zram/sddc/zram_sddc_codec.c
+@@ -0,0 +1,175 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/err.h>
++#include <linux/mm.h>
++#include <linux/sizes.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/vmalloc.h>
++
++#include "zram_sddc_codec.h"
++#include "lz4kd/lz4kd.h"
++
++#define ZRAM_SDDC_BLOCK_SIZE	SZ_4K
++#define ZRAM_SDDC_WINDOW_SIZE	(2 * ZRAM_SDDC_BLOCK_SIZE)
++
++struct zram_sddc_codec {
++	void *encode_state;
++	u8 *delta_window;
++};
++
++bool zram_sddc_codec_available(void)
++{
++	return PAGE_SIZE == ZRAM_SDDC_BLOCK_SIZE;
++}
++
++struct zram_sddc_codec *zram_sddc_codec_create(void)
++{
++	struct zram_sddc_codec *codec;
++
++	if (!zram_sddc_codec_available())
++		return ERR_PTR(-EOPNOTSUPP);
++
++	codec = kzalloc(sizeof(*codec), GFP_KERNEL);
++	if (!codec)
++		return ERR_PTR(-ENOMEM);
++
++	codec->encode_state = kvzalloc(
++		crystal_lz4kd_encode_state_bytes_min(), GFP_KERNEL);
++	codec->delta_window = kvzalloc(ZRAM_SDDC_WINDOW_SIZE, GFP_KERNEL);
++	if (!codec->encode_state || !codec->delta_window) {
++		zram_sddc_codec_destroy(codec);
++		return ERR_PTR(-ENOMEM);
++	}
++
++	return codec;
++}
++
++void zram_sddc_codec_destroy(struct zram_sddc_codec *codec)
++{
++	if (!codec)
++		return;
++
++	kvfree(codec->delta_window);
++	kvfree(codec->encode_state);
++	kfree(codec);
++}
++
++int zram_sddc_codec_compress(struct zram_sddc_codec *codec,
++		const void *src, unsigned int src_len, void *dst,
++		unsigned int *dst_len)
++{
++	int ret;
++
++	if (!codec || !src || !dst || !dst_len || !*dst_len ||
++	    src_len != ZRAM_SDDC_BLOCK_SIZE)
++		return -EINVAL;
++
++	ret = crystal_lz4kd_encode(codec->encode_state, src, dst, src_len,
++				    *dst_len, 0);
++	if (ret < 0)
++		return -EINVAL;
++	if (ret > 0)
++		*dst_len = ret;
++
++	return 0;
++}
++
++int zram_sddc_codec_decompress(struct zram_sddc_codec *codec,
++		const void *src, unsigned int src_len, void *dst,
++		unsigned int *dst_len)
++{
++	int ret;
++
++	if (!codec || !src || !src_len || src_len > ZRAM_SDDC_BLOCK_SIZE ||
++	    !dst || !dst_len ||
++	    *dst_len != ZRAM_SDDC_BLOCK_SIZE)
++		return -EINVAL;
++
++	ret = crystal_lz4kd_decode(src, dst, src_len, *dst_len);
++	if (ret != ZRAM_SDDC_BLOCK_SIZE)
++		return -EINVAL;
++
++	*dst_len = ret;
++	return 0;
++}
++
++int zram_sddc_codec_compress_delta(struct zram_sddc_codec *codec,
++		const void *ref, unsigned int ref_len, const void *src,
++		unsigned int src_len, void *dst, unsigned int *dst_len,
++		unsigned int out_limit)
++{
++	u8 *current_data;
++	int ret;
++
++	if (!codec || !ref || !ref_len || !src || src_len < 16 || !dst ||
++	    !dst_len || !*dst_len || ref_len > ZRAM_SDDC_BLOCK_SIZE ||
++	    src_len > ZRAM_SDDC_BLOCK_SIZE ||
++	    ref_len + src_len > ZRAM_SDDC_WINDOW_SIZE)
++		return -EINVAL;
++
++	memcpy(codec->delta_window, ref, ref_len);
++	current_data = codec->delta_window + ref_len;
++	memcpy(current_data, src, src_len);
++
++	ret = crystal_lz4kd_encode_delta(codec->encode_state,
++			codec->delta_window, current_data, dst, src_len, *dst_len,
++			out_limit);
++	if (ret < 0)
++		return -EINVAL;
++	if (ret > 0)
++		*dst_len = ret;
++
++	return 0;
++}
++
++int
++zram_sddc_codec_decompress_delta_borrowed(struct zram_sddc_codec *codec,
++		const void *src, unsigned int src_len, const void *ref,
++		unsigned int ref_len, const void **restored,
++		unsigned int *restored_len)
++{
++	u8 *current_data;
++	int ret;
++
++	if (!restored || !restored_len)
++		return -EINVAL;
++	*restored = NULL;
++	if (!codec || !src || !src_len ||
++	    src_len > ZRAM_SDDC_BLOCK_SIZE || !ref || !ref_len ||
++	    !*restored_len ||
++	    ref_len > ZRAM_SDDC_BLOCK_SIZE ||
++	    *restored_len != ZRAM_SDDC_BLOCK_SIZE ||
++	    ref_len + *restored_len > ZRAM_SDDC_WINDOW_SIZE)
++		return -EINVAL;
++
++	memcpy(codec->delta_window, ref, ref_len);
++	current_data = codec->delta_window + ref_len;
++	ret = crystal_lz4kd_decode_delta(src, codec->delta_window, current_data,
++					 src_len, *restored_len);
++	if (ret <= 0 || ret > *restored_len)
++		return -EINVAL;
++
++	*restored = current_data;
++	*restored_len = ret;
++	return 0;
++}
++
++int zram_sddc_codec_decompress_delta(struct zram_sddc_codec *codec,
++		const void *src, unsigned int src_len, const void *ref,
++		unsigned int ref_len, void *dst, unsigned int *dst_len)
++{
++	const void *restored;
++	int ret;
++
++	if (!dst || !dst_len)
++		return -EINVAL;
++
++	ret = zram_sddc_codec_decompress_delta_borrowed(codec, src, src_len,
++			ref, ref_len, &restored, dst_len);
++	if (ret)
++		return ret;
++
++	memcpy(dst, restored, *dst_len);
++	return 0;
++}
+diff --git a/drivers/block/zram/sddc/zram_sddc_codec.h b/drivers/block/zram/sddc/zram_sddc_codec.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb204f149e55b3cf488bf222478171db54fdaacc
+--- /dev/null
++++ b/drivers/block/zram/sddc/zram_sddc_codec.h
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#ifndef _ZRAM_SDDC_CODEC_H_
++#define _ZRAM_SDDC_CODEC_H_
++
++#include <linux/types.h>
++
++struct zram_sddc_codec;
++
++bool zram_sddc_codec_available(void);
++struct zram_sddc_codec *zram_sddc_codec_create(void);
++void zram_sddc_codec_destroy(struct zram_sddc_codec *codec);
++
++int zram_sddc_codec_compress(struct zram_sddc_codec *codec,
++		const void *src, unsigned int src_len, void *dst,
++		unsigned int *dst_len);
++int zram_sddc_codec_decompress(struct zram_sddc_codec *codec,
++		const void *src, unsigned int src_len, void *dst,
++		unsigned int *dst_len);
++
++int zram_sddc_codec_compress_delta(struct zram_sddc_codec *codec,
++		const void *ref, unsigned int ref_len, const void *src,
++		unsigned int src_len, void *dst, unsigned int *dst_len,
++		unsigned int out_limit);
++int zram_sddc_codec_decompress_delta(struct zram_sddc_codec *codec,
++		const void *src, unsigned int src_len, const void *ref,
++		unsigned int ref_len, void *dst, unsigned int *dst_len);
++/*
++ * Restore an ordinary stream into the codec's private delta window. The
++ * returned pointer remains valid while the owning zcomp stream is locked and
++ * until another delta operation uses the same codec.
++ */
++int
++zram_sddc_codec_decompress_delta_borrowed(struct zram_sddc_codec *codec,
++		const void *src, unsigned int src_len, const void *ref,
++		unsigned int ref_len, const void **restored,
++		unsigned int *restored_len);
++
++#endif /* _ZRAM_SDDC_CODEC_H_ */
+diff --git a/drivers/block/zram/sddc/zram_sddc_codec_test.c b/drivers/block/zram/sddc/zram_sddc_codec_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6b70532fdcb6ceb31918b24312d257e50cff879
+--- /dev/null
++++ b/drivers/block/zram/sddc/zram_sddc_codec_test.c
+@@ -0,0 +1,282 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <kunit/test.h>
++#include <linux/err.h>
++#include <linux/mm.h>
++#include <linux/string.h>
++
++#include "zram_sddc_codec.h"
++#include "lz4kd/lz4kd.h"
++
++struct zram_sddc_codec_test_ctx {
++	struct zram_sddc_codec *codec;
++};
++
++static int zram_sddc_codec_test_init(struct kunit *test)
++{
++	struct zram_sddc_codec_test_ctx *ctx;
++
++	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	ctx->codec = zram_sddc_codec_create();
++	if (IS_ERR(ctx->codec))
++		return PTR_ERR(ctx->codec);
++
++	test->priv = ctx;
++	return 0;
++}
++
++static void zram_sddc_codec_test_exit(struct kunit *test)
++{
++	struct zram_sddc_codec_test_ctx *ctx = test->priv;
++
++	if (!ctx)
++		return;
++
++	zram_sddc_codec_destroy(ctx->codec);
++}
++
++static void zram_sddc_fill_prandom(u8 *buf, size_t len, u32 seed)
++{
++	u32 state = seed;
++	size_t i;
++
++	for (i = 0; i < len; i++) {
++		state ^= state << 13;
++		state ^= state >> 17;
++		state ^= state << 5;
++		buf[i] = state;
++	}
++}
++
++static void zram_sddc_codec_roundtrip_test(struct kunit *test)
++{
++	struct zram_sddc_codec_test_ctx *ctx = test->priv;
++	unsigned int encoded_len = 2 * PAGE_SIZE;
++	unsigned int decoded_len = PAGE_SIZE;
++	u8 *encoded = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
++	u8 *decoded = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	u8 *page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	int ret;
++
++	KUNIT_ASSERT_NOT_NULL(test, encoded);
++	KUNIT_ASSERT_NOT_NULL(test, decoded);
++	KUNIT_ASSERT_NOT_NULL(test, page);
++	memset(page, 0x5a, PAGE_SIZE);
++
++	ret = zram_sddc_codec_compress(ctx->codec, page, PAGE_SIZE,
++					  encoded, &encoded_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_LT(test, encoded_len, (unsigned int)PAGE_SIZE);
++
++	ret = zram_sddc_codec_decompress(ctx->codec, encoded, encoded_len,
++					    decoded, &decoded_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_EQ(test, decoded_len, (unsigned int)PAGE_SIZE);
++	KUNIT_EXPECT_MEMEQ(test, decoded, page, PAGE_SIZE);
++}
++
++static void zram_sddc_codec_raw_contract_test(struct kunit *test)
++{
++	struct zram_sddc_codec_test_ctx *ctx = test->priv;
++	unsigned int encoded_len = 2 * PAGE_SIZE;
++	unsigned int decoded_len = PAGE_SIZE;
++	u8 *encoded = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
++	u8 *decoded = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	u8 *page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	int ret;
++
++	KUNIT_ASSERT_NOT_NULL(test, encoded);
++	KUNIT_ASSERT_NOT_NULL(test, decoded);
++	KUNIT_ASSERT_NOT_NULL(test, page);
++	zram_sddc_fill_prandom(page, PAGE_SIZE, 0x13579bdf);
++
++	ret = zram_sddc_codec_compress(ctx->codec, page, PAGE_SIZE,
++					  encoded, &encoded_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	if (encoded_len >= PAGE_SIZE) {
++		KUNIT_EXPECT_EQ(test, encoded_len, 2U * PAGE_SIZE);
++		return;
++	}
++
++	ret = zram_sddc_codec_decompress(ctx->codec, encoded, encoded_len,
++					    decoded, &decoded_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_MEMEQ(test, decoded, page, PAGE_SIZE);
++}
++
++static void zram_sddc_codec_delta_chain_test(struct kunit *test)
++{
++	struct zram_sddc_codec_test_ctx *ctx = test->priv;
++	unsigned int ref_encoded_len = 2 * PAGE_SIZE;
++	unsigned int cur_encoded_len = 2 * PAGE_SIZE;
++	unsigned int delta_len = 2 * PAGE_SIZE;
++	unsigned int restored_encoded_len = PAGE_SIZE;
++	unsigned int restored_page_len = PAGE_SIZE;
++	const void *restored_encoded;
++	u8 *ref_encoded = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
++	u8 *cur_encoded = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
++	u8 *delta = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
++	u8 *restored_page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	u8 *ref_page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	u8 *cur_page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	int ret;
++
++	KUNIT_ASSERT_NOT_NULL(test, ref_encoded);
++	KUNIT_ASSERT_NOT_NULL(test, cur_encoded);
++	KUNIT_ASSERT_NOT_NULL(test, delta);
++	KUNIT_ASSERT_NOT_NULL(test, restored_page);
++	KUNIT_ASSERT_NOT_NULL(test, ref_page);
++	KUNIT_ASSERT_NOT_NULL(test, cur_page);
++
++	zram_sddc_fill_prandom(ref_page, PAGE_SIZE / 2, 0x2468ace1);
++	memcpy(ref_page + PAGE_SIZE / 2, ref_page, PAGE_SIZE / 2);
++	memcpy(cur_page, ref_page, PAGE_SIZE);
++	cur_page[127] ^= 0x55;
++	cur_page[PAGE_SIZE / 2 + 127] ^= 0x55;
++
++	ret = zram_sddc_codec_compress(ctx->codec, ref_page, PAGE_SIZE,
++					  ref_encoded, &ref_encoded_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_LT(test, ref_encoded_len, (unsigned int)PAGE_SIZE);
++	ret = zram_sddc_codec_compress(ctx->codec, cur_page, PAGE_SIZE,
++					  cur_encoded, &cur_encoded_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_LT(test, cur_encoded_len, (unsigned int)PAGE_SIZE);
++
++	ret = zram_sddc_codec_compress_delta(ctx->codec, ref_encoded,
++			ref_encoded_len, cur_encoded, cur_encoded_len, delta,
++			&delta_len, cur_encoded_len - 1);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_LT(test, delta_len, cur_encoded_len);
++
++	ret = zram_sddc_codec_decompress_delta_borrowed(ctx->codec, delta,
++			delta_len, ref_encoded, ref_encoded_len, &restored_encoded,
++			&restored_encoded_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_NOT_NULL(test, restored_encoded);
++	KUNIT_ASSERT_EQ(test, restored_encoded_len, cur_encoded_len);
++	KUNIT_EXPECT_MEMEQ(test, restored_encoded, cur_encoded, cur_encoded_len);
++
++	ret = zram_sddc_codec_decompress(ctx->codec, restored_encoded,
++			restored_encoded_len, restored_page, &restored_page_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_MEMEQ(test, restored_page, cur_page, PAGE_SIZE);
++}
++
++static void zram_sddc_codec_full_window_test(struct kunit *test)
++{
++	struct zram_sddc_codec_test_ctx *ctx = test->priv;
++	unsigned int delta_len = 2 * PAGE_SIZE;
++	unsigned int restored_len = PAGE_SIZE;
++	u8 *ref = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	u8 *current_data = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	u8 *delta = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
++	u8 *restored = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	int ret;
++
++	KUNIT_ASSERT_NOT_NULL(test, ref);
++	KUNIT_ASSERT_NOT_NULL(test, current_data);
++	KUNIT_ASSERT_NOT_NULL(test, delta);
++	KUNIT_ASSERT_NOT_NULL(test, restored);
++	zram_sddc_fill_prandom(ref, PAGE_SIZE, 0x10203040);
++	memcpy(current_data, ref, PAGE_SIZE);
++	current_data[0] ^= 0xa5;
++	current_data[PAGE_SIZE - 1] ^= 0x5a;
++
++	ret = zram_sddc_codec_compress_delta(ctx->codec, ref, PAGE_SIZE,
++			current_data, PAGE_SIZE, delta, &delta_len,
++			PAGE_SIZE - 1);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_LT(test, delta_len, (unsigned int)PAGE_SIZE);
++
++	ret = zram_sddc_codec_decompress_delta(ctx->codec, delta, delta_len,
++			ref, PAGE_SIZE, restored, &restored_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_EQ(test, restored_len, (unsigned int)PAGE_SIZE);
++	KUNIT_EXPECT_MEMEQ(test, restored, current_data, PAGE_SIZE);
++}
++
++static void zram_sddc_codec_malformed_test(struct kunit *test)
++{
++	struct zram_sddc_codec_test_ctx *ctx = test->priv;
++	unsigned int encoded_len = 2 * PAGE_SIZE;
++	unsigned int decoded_len = PAGE_SIZE;
++	unsigned int restored_len = PAGE_SIZE;
++	const void *restored = (const void *)1;
++	u8 malformed[4] = { 0 };
++	u8 *encoded = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
++	u8 *decoded = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	u8 *page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
++	int ret;
++
++	KUNIT_ASSERT_NOT_NULL(test, encoded);
++	KUNIT_ASSERT_NOT_NULL(test, decoded);
++	KUNIT_ASSERT_NOT_NULL(test, page);
++	memset(page, 0x6b, PAGE_SIZE);
++	ret = zram_sddc_codec_compress(ctx->codec, page, PAGE_SIZE,
++					  encoded, &encoded_len);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_ASSERT_LT(test, 1U, encoded_len);
++	ret = zram_sddc_codec_decompress(ctx->codec, encoded,
++			encoded_len - 1, decoded, &decoded_len);
++	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
++
++	decoded_len = PAGE_SIZE;
++	ret = zram_sddc_codec_decompress(ctx->codec, malformed,
++			sizeof(malformed), decoded, &decoded_len);
++	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
++
++	ret = zram_sddc_codec_decompress_delta_borrowed(ctx->codec,
++			malformed, sizeof(malformed), page, PAGE_SIZE, &restored,
++			&restored_len);
++	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
++	KUNIT_EXPECT_NULL(test, restored);
++}
++
++static void zram_sddc_codec_delta_output_bounds_test(struct kunit *test)
++{
++	u8 *state = kunit_kmalloc(test,
++			crystal_lz4kd_encode_state_bytes_min(), GFP_KERNEL);
++	u8 *window = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
++	u8 output[16];
++	unsigned int out_size;
++	int ret;
++
++	KUNIT_ASSERT_NOT_NULL(test, state);
++	KUNIT_ASSERT_NOT_NULL(test, window);
++	memset(window, 0x5a, 2 * PAGE_SIZE);
++
++	for (out_size = 0; out_size < ARRAY_SIZE(output); out_size++) {
++		unsigned int i;
++
++		memset(output, 0xa5, sizeof(output));
++		ret = crystal_lz4kd_encode_delta(state, window,
++				window + PAGE_SIZE, output, PAGE_SIZE, out_size,
++				out_size);
++		KUNIT_EXPECT_LE(test, ret, 0);
++		for (i = out_size; i < ARRAY_SIZE(output); i++)
++			KUNIT_EXPECT_EQ(test, output[i], (u8)0xa5);
++	}
++}
++
++static struct kunit_case zram_sddc_codec_test_cases[] = {
++	KUNIT_CASE(zram_sddc_codec_roundtrip_test),
++	KUNIT_CASE(zram_sddc_codec_raw_contract_test),
++	KUNIT_CASE(zram_sddc_codec_delta_chain_test),
++	KUNIT_CASE(zram_sddc_codec_full_window_test),
++	KUNIT_CASE(zram_sddc_codec_malformed_test),
++	KUNIT_CASE(zram_sddc_codec_delta_output_bounds_test),
++	{}
++};
++
++static struct kunit_suite zram_sddc_codec_test_suite = {
++	.name = "zram-sddc-codec",
++	.init = zram_sddc_codec_test_init,
++	.exit = zram_sddc_codec_test_exit,
++	.test_cases = zram_sddc_codec_test_cases,
++};
++
++kunit_test_suite(zram_sddc_codec_test_suite);
+diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
+index 8237b08c49d8617d338193e5d4a1900f81182f53..2f29ae1e2647b1d580ddb6f25bcf861525384895 100644
+--- a/drivers/block/zram/zcomp.c
++++ b/drivers/block/zram/zcomp.c
+@@ -14,6 +14,9 @@
+ #include <linux/vmalloc.h>
+ 
+ #include "zcomp.h"
++#if IS_ENABLED(CONFIG_ZRAM_SDDC)
++#include "sddc/zram_sddc_codec.h"
++#endif
+ 
+ static const char * const backends[] = {
+ #if IS_ENABLED(CONFIG_CRYPTO_LZO)
+@@ -26,6 +29,9 @@ static const char * const backends[] = {
+ #if IS_ENABLED(CONFIG_CRYPTO_LZ4HC)
+ 	"lz4hc",
+ #endif
++#if IS_ENABLED(CONFIG_ZRAM_SDDC)
++	"lz4kds",
++#endif
+ #if IS_ENABLED(CONFIG_CRYPTO_842)
+ 	"842",
+ #endif
+@@ -34,36 +40,175 @@ static const char * const backends[] = {
+ #endif
+ };
+ 
++static int crypto_backend_create(struct zcomp_strm *zstrm, const char *name)
++{
++	zstrm->tfm = crypto_alloc_comp(name, 0, 0);
++	if (IS_ERR_OR_NULL(zstrm->tfm)) {
++		zstrm->tfm = NULL;
++		return -ENOMEM;
++	}
++
++	return 0;
++}
++
++static void crypto_backend_destroy(struct zcomp_strm *zstrm)
++{
++	if (zstrm->tfm)
++		crypto_free_comp(zstrm->tfm);
++	zstrm->tfm = NULL;
++}
++
++static int crypto_backend_compress(struct zcomp_strm *zstrm,
++		const void *src, unsigned int src_len, void *dst,
++		unsigned int *dst_len)
++{
++	return crypto_comp_compress(zstrm->tfm, src, src_len, dst, dst_len);
++}
++
++static int crypto_backend_decompress(struct zcomp_strm *zstrm,
++		const void *src, unsigned int src_len, void *dst,
++		unsigned int *dst_len)
++{
++	return crypto_comp_decompress(zstrm->tfm, src, src_len, dst, dst_len);
++}
++
++static const struct zcomp_backend_ops crypto_backend_ops = {
++	.create = crypto_backend_create,
++	.destroy = crypto_backend_destroy,
++	.compress = crypto_backend_compress,
++	.decompress = crypto_backend_decompress,
++};
++
++#if IS_ENABLED(CONFIG_ZRAM_SDDC)
++static int lz4kds_backend_create(struct zcomp_strm *zstrm, const char *name)
++{
++	struct zram_sddc_codec *codec;
++
++	(void)name;
++	codec = zram_sddc_codec_create();
++	if (IS_ERR(codec))
++		return PTR_ERR(codec);
++	zstrm->backend_data = codec;
++	return 0;
++}
++
++static void lz4kds_backend_destroy(struct zcomp_strm *zstrm)
++{
++	zram_sddc_codec_destroy(zstrm->backend_data);
++	zstrm->backend_data = NULL;
++}
++
++static int lz4kds_backend_compress(struct zcomp_strm *zstrm,
++		const void *src, unsigned int src_len, void *dst,
++		unsigned int *dst_len)
++{
++	return zram_sddc_codec_compress(zstrm->backend_data, src, src_len,
++					   dst, dst_len);
++}
++
++static int lz4kds_backend_decompress(struct zcomp_strm *zstrm,
++		const void *src, unsigned int src_len, void *dst,
++		unsigned int *dst_len)
++{
++	return zram_sddc_codec_decompress(zstrm->backend_data, src, src_len,
++					     dst, dst_len);
++}
++
++static int lz4kds_backend_compress_delta(struct zcomp_strm *zstrm,
++		const void *ref, unsigned int ref_len, const void *src,
++		unsigned int src_len, void *dst, unsigned int *dst_len,
++		unsigned int out_limit)
++{
++	return zram_sddc_codec_compress_delta(zstrm->backend_data, ref,
++			ref_len, src, src_len, dst, dst_len, out_limit);
++}
++
++static int lz4kds_backend_decompress_delta(struct zcomp_strm *zstrm,
++		const void *src, unsigned int src_len, const void *ref,
++		unsigned int ref_len, void *dst, unsigned int *dst_len)
++{
++	return zram_sddc_codec_decompress_delta(zstrm->backend_data, src,
++			src_len, ref, ref_len, dst, dst_len);
++}
++
++static int
++lz4kds_backend_decompress_delta_borrowed(struct zcomp_strm *zstrm,
++		const void *src, unsigned int src_len, const void *ref,
++		unsigned int ref_len, const void **restored,
++		unsigned int *restored_len)
++{
++	return zram_sddc_codec_decompress_delta_borrowed(zstrm->backend_data,
++			src, src_len, ref, ref_len, restored, restored_len);
++}
++
++static const struct zcomp_backend_ops lz4kds_backend_ops = {
++	.create = lz4kds_backend_create,
++	.destroy = lz4kds_backend_destroy,
++	.compress = lz4kds_backend_compress,
++	.decompress = lz4kds_backend_decompress,
++	.compress_delta = lz4kds_backend_compress_delta,
++	.decompress_delta = lz4kds_backend_decompress_delta,
++	.decompress_delta_borrowed =
++		lz4kds_backend_decompress_delta_borrowed,
++};
++#endif
++
++static const struct zcomp_backend_ops *zcomp_backend(const char *name)
++{
++#if IS_ENABLED(CONFIG_ZRAM_SDDC)
++	if (!strcmp(name, "lz4kds"))
++		return &lz4kds_backend_ops;
++#endif
++	return &crypto_backend_ops;
++}
++
+ static void zcomp_strm_free(struct zcomp_strm *zstrm)
+ {
+-	if (!IS_ERR_OR_NULL(zstrm->tfm))
+-		crypto_free_comp(zstrm->tfm);
++	if (zstrm->ops && zstrm->ops->destroy)
++		zstrm->ops->destroy(zstrm);
+ 	vfree(zstrm->buffer);
+ 	zstrm->tfm = NULL;
++	zstrm->backend_data = NULL;
+ 	zstrm->buffer = NULL;
++	zstrm->ops = NULL;
+ }
+ 
+ /*
+  * Initialize zcomp_strm structure with ->tfm initialized by backend, and
+  * ->buffer. Return a negative value on error.
+  */
+-static int zcomp_strm_init(struct zcomp_strm *zstrm, struct zcomp *comp)
++static int zcomp_strm_init(struct zcomp_strm *zstrm,
++				       struct zcomp *comp)
+ {
+-	zstrm->tfm = crypto_alloc_comp(comp->name, 0, 0);
++	int ret;
++
++	zstrm->ops = comp->ops;
++	zstrm->tfm = NULL;
++	zstrm->backend_data = NULL;
+ 	/*
+ 	 * allocate 2 pages. 1 for compressed data, plus 1 extra for the
+ 	 * case when compressed size is larger than the original one
+ 	 */
+ 	zstrm->buffer = vzalloc(2 * PAGE_SIZE);
+-	if (IS_ERR_OR_NULL(zstrm->tfm) || !zstrm->buffer) {
++	if (!zstrm->buffer) {
+ 		zcomp_strm_free(zstrm);
+ 		return -ENOMEM;
+ 	}
++
++	ret = zstrm->ops->create(zstrm, comp->name);
++	if (ret) {
++		zcomp_strm_free(zstrm);
++		return ret;
++	}
+ 	return 0;
+ }
+ 
+ bool zcomp_available_algorithm(const char *comp)
+ {
++#if IS_ENABLED(CONFIG_ZRAM_SDDC)
++	if (!strcmp(comp, "lz4kds"))
++		return zram_sddc_codec_available();
++#endif
+ 	/*
+ 	 * Crypto does not ignore a trailing new line symbol,
+ 	 * so make sure you don't supply a string containing
+@@ -134,9 +279,8 @@ int zcomp_compress(struct zcomp_strm *zstrm,
+ 	 */
+ 	*dst_len = PAGE_SIZE * 2;
+ 
+-	return crypto_comp_compress(zstrm->tfm,
+-			src, PAGE_SIZE,
+-			zstrm->buffer, dst_len);
++	return zstrm->ops->compress(zstrm, src, PAGE_SIZE, zstrm->buffer,
++				    dst_len);
+ }
+ 
+ int zcomp_decompress(struct zcomp_strm *zstrm,
+@@ -144,14 +288,64 @@ int zcomp_decompress(struct zcomp_strm *zstrm,
+ {
+ 	unsigned int dst_len = PAGE_SIZE;
+ 
+-	return crypto_comp_decompress(zstrm->tfm,
+-			src, src_len,
+-			dst, &dst_len);
++	return zstrm->ops->decompress(zstrm, src, src_len, dst, &dst_len);
++}
++
++bool zcomp_supports_delta(const struct zcomp *comp)
++{
++	return comp && comp->ops && comp->ops->compress_delta &&
++		comp->ops->decompress_delta;
++}
++
++int zcomp_compress_delta(struct zcomp_strm *zstrm, const void *ref,
++		unsigned int ref_len, const void *src, unsigned int src_len,
++		unsigned int *dst_len, unsigned int out_limit)
++{
++	if (!zstrm->ops->compress_delta)
++		return -EOPNOTSUPP;
++
++	*dst_len = 2 * PAGE_SIZE;
++	return zstrm->ops->compress_delta(zstrm, ref, ref_len, src, src_len,
++			zstrm->buffer, dst_len, out_limit);
++}
++
++int zcomp_decompress_delta(struct zcomp_strm *zstrm, const void *src,
++		unsigned int src_len, const void *ref, unsigned int ref_len,
++		void *dst, unsigned int *dst_len)
++{
++	if (!zstrm->ops->decompress_delta)
++		return -EOPNOTSUPP;
++
++	*dst_len = PAGE_SIZE;
++	return zstrm->ops->decompress_delta(zstrm, src, src_len, ref,
++			ref_len, dst, dst_len);
++}
++
++int zcomp_decompress_delta_borrowed(struct zcomp_strm *zstrm, const void *src,
++		unsigned int src_len, const void *ref, unsigned int ref_len,
++		const void **restored, unsigned int *restored_len)
++{
++	int ret;
++
++	if (!restored || !restored_len)
++		return -EINVAL;
++	*restored = NULL;
++	*restored_len = PAGE_SIZE;
++	if (zstrm->ops->decompress_delta_borrowed)
++		return zstrm->ops->decompress_delta_borrowed(zstrm, src,
++				src_len, ref, ref_len, restored, restored_len);
++
++	ret = zcomp_decompress_delta(zstrm, src, src_len, ref, ref_len,
++			zstrm->buffer, restored_len);
++	if (!ret)
++		*restored = zstrm->buffer;
++	return ret;
+ }
+ 
+ int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)
+ {
+-	struct zcomp *comp = hlist_entry(node, struct zcomp, node);
++	struct zcomp *comp = hlist_entry(node, struct zcomp,
++					       node);
+ 	struct zcomp_strm *zstrm;
+ 	int ret;
+ 
+@@ -166,7 +360,8 @@ int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)
+ 
+ int zcomp_cpu_dead(unsigned int cpu, struct hlist_node *node)
+ {
+-	struct zcomp *comp = hlist_entry(node, struct zcomp, node);
++	struct zcomp *comp = hlist_entry(node, struct zcomp,
++					       node);
+ 	struct zcomp_strm *zstrm;
+ 
+ 	zstrm = per_cpu_ptr(comp->stream, cpu);
+@@ -225,6 +420,7 @@ struct zcomp *zcomp_create(const char *alg)
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	comp->name = alg;
++	comp->ops = zcomp_backend(alg);
+ 	error = zcomp_init(comp);
+ 	if (error) {
+ 		kfree(comp);
+diff --git a/drivers/block/zram/zcomp.h b/drivers/block/zram/zcomp.h
+index cdefdef93da8c00d3086e10c0980f7c5462694e8..06813fe6985bb03bda4bbad5840d9cb6f592749c 100644
+--- a/drivers/block/zram/zcomp.h
++++ b/drivers/block/zram/zcomp.h
+@@ -7,18 +7,47 @@
+ #define _ZCOMP_H_
+ #include <linux/local_lock.h>
+ 
++struct zcomp_strm;
++
++struct zcomp_backend_ops {
++	int (*create)(struct zcomp_strm *zstrm, const char *name);
++	void (*destroy)(struct zcomp_strm *zstrm);
++	int (*compress)(struct zcomp_strm *zstrm, const void *src,
++			unsigned int src_len, void *dst, unsigned int *dst_len);
++	int (*decompress)(struct zcomp_strm *zstrm, const void *src,
++			  unsigned int src_len, void *dst,
++			  unsigned int *dst_len);
++	int (*compress_delta)(struct zcomp_strm *zstrm, const void *ref,
++			      unsigned int ref_len, const void *src,
++			      unsigned int src_len, void *dst,
++			      unsigned int *dst_len,
++			      unsigned int out_limit);
++	int (*decompress_delta)(struct zcomp_strm *zstrm, const void *src,
++				unsigned int src_len, const void *ref,
++				unsigned int ref_len, void *dst,
++				unsigned int *dst_len);
++	/* The borrowed output remains valid while this per-CPU stream is locked. */
++	int (*decompress_delta_borrowed)(struct zcomp_strm *zstrm,
++				const void *src, unsigned int src_len,
++				const void *ref, unsigned int ref_len,
++				const void **restored,
++				unsigned int *restored_len);
++};
++
+ struct zcomp_strm {
+-	/* The members ->buffer and ->tfm are protected by ->lock. */
++	/* Stream members are protected by ->lock. */
+ 	local_lock_t lock;
+-	/* compression/decompression buffer */
+ 	void *buffer;
+ 	struct crypto_comp *tfm;
++	void *backend_data;
++	const struct zcomp_backend_ops *ops;
+ };
+ 
+ /* dynamic per-device compression frontend */
+ struct zcomp {
+ 	struct zcomp_strm __percpu *stream;
+ 	const char *name;
++	const struct zcomp_backend_ops *ops;
+ 	struct hlist_node node;
+ };
+ 
+@@ -35,9 +64,18 @@ void zcomp_stream_put(struct zcomp *comp);
+ 
+ int zcomp_compress(struct zcomp_strm *zstrm,
+ 		const void *src, unsigned int *dst_len);
+-
+ int zcomp_decompress(struct zcomp_strm *zstrm,
+ 		const void *src, unsigned int src_len, void *dst);
++bool zcomp_supports_delta(const struct zcomp *comp);
++int zcomp_compress_delta(struct zcomp_strm *zstrm, const void *ref,
++		unsigned int ref_len, const void *src, unsigned int src_len,
++		unsigned int *dst_len, unsigned int out_limit);
++int zcomp_decompress_delta(struct zcomp_strm *zstrm, const void *src,
++		unsigned int src_len, const void *ref, unsigned int ref_len,
++		void *dst, unsigned int *dst_len);
++int zcomp_decompress_delta_borrowed(struct zcomp_strm *zstrm, const void *src,
++		unsigned int src_len, const void *ref, unsigned int ref_len,
++		const void **restored, unsigned int *restored_len);
+ 
+ bool zcomp_set_max_streams(struct zcomp *comp, int num_strm);
+ #endif /* _ZCOMP_H_ */
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b094ba2692 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -139,7 +139,8 @@ static inline bool zram_allocated(struct zram *zram, u32 index)
+ {
+ 	return zram_get_obj_size(zram, index) ||
+ 			zram_test_flag(zram, index, ZRAM_SAME) ||
+-			zram_test_flag(zram, index, ZRAM_WB);
++			zram_test_flag(zram, index, ZRAM_WB) ||
++			zram_sddc_slot_allocated_locked(zram, index);
+ }
+ 
+ #if PAGE_SIZE != 4096
+@@ -696,7 +697,8 @@ static ssize_t writeback_store(struct device *dev,
+ 
+ 		if (zram_test_flag(zram, index, ZRAM_WB) ||
+ 				zram_test_flag(zram, index, ZRAM_SAME) ||
+-				zram_test_flag(zram, index, ZRAM_UNDER_WB))
++				zram_test_flag(zram, index, ZRAM_UNDER_WB) ||
++				zram_sddc_slot_managed_locked(zram, index))
+ 			goto next;
+ 
+ 		if (mode & IDLE_WRITEBACK &&
+@@ -1232,6 +1234,34 @@ static DEVICE_ATTR_RO(mm_stat);
+ static DEVICE_ATTR_RO(bd_stat);
+ #endif
+ static DEVICE_ATTR_RO(debug_stat);
++#ifdef CONFIG_ZRAM_SDDC
++static ssize_t sddc_stat_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	struct zram_sddc_stats_snapshot stats;
++	struct zram *zram = dev_to_zram(dev);
++
++	zram_sddc_get_stats(zram, &stats);
++	return sysfs_emit(buf,
++		"enabled: %u\n"
++		"queued: %llu\n"
++		"observed: %llu\n"
++		"refs: %llu\n"
++		"aliases: %llu\n"
++		"deltas: %llu\n"
++		"alias_hits: %llu\n"
++		"delta_hits: %llu\n"
++		"saved_bytes: %llu\n"
++		"saved_bytes_total: %llu\n"
++		"decode_failures: %llu\n"
++		"flatten_failures: %llu\n",
++		stats.enabled, stats.queued, stats.observed, stats.refs,
++		stats.aliases, stats.deltas, stats.alias_hits,
++		stats.delta_hits, stats.saved_bytes, stats.saved_bytes_total,
++		stats.decode_failures, stats.flatten_failures);
++}
++static DEVICE_ATTR_RO(sddc_stat);
++#endif
+ 
+ static void zram_meta_free(struct zram *zram, u64 disksize)
+ {
+@@ -1241,9 +1271,13 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
+ 	if (!zram->table)
+ 		return;
+ 
+-	/* Free all pages that are still in this zram device */
+-	for (index = 0; index < num_pages; index++)
++	/* Free all pages that are still in this zram device. */
++	for (index = 0; index < num_pages; index++) {
++		zram_slot_lock(zram, index);
+ 		zram_free_page(zram, index);
++		zram_slot_unlock(zram, index);
++	}
++	zram_sddc_destroy(zram);
+ 
+ 	zs_destroy_pool(zram->mem_pool);
+ 	vfree(zram->table);
+@@ -1279,6 +1313,7 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
+ static void zram_free_page(struct zram *zram, size_t index)
+ {
+ 	unsigned long handle;
++	enum zram_sddc_kind sddc_kind;
+ 
+ #ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+ 	zram->table[index].ac_time = 0;
+@@ -1296,6 +1331,9 @@ static void zram_free_page(struct zram *zram, size_t index)
+ 
+ 	zram_set_priority(zram, index, 0);
+ 
++	/* Drop SDDC ownership before freeing its ordinary or delta object. */
++	sddc_kind = zram_sddc_slot_free_locked(zram, index);
++
+ 	if (zram_test_flag(zram, index, ZRAM_WB)) {
+ 		zram_clear_flag(zram, index, ZRAM_WB);
+ 		free_block_bdev(zram, zram_get_element(zram, index));
+@@ -1313,8 +1351,10 @@ static void zram_free_page(struct zram *zram, size_t index)
+ 	}
+ 
+ 	handle = zram_get_handle(zram, index);
+-	if (!handle)
++	if (!handle && sddc_kind == ZRAM_SDDC_NONE)
+ 		return;
++	if (!handle)
++		goto out;
+ 
+ 	zs_free(zram->mem_pool, handle);
+ 
+@@ -1382,11 +1422,20 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
+ {
+ 	int ret;
+ 
++retry:
+ 	zram_slot_lock(zram, index);
+ 	if (!zram_test_flag(zram, index, ZRAM_WB)) {
+-		/* Slot should be locked through out the function call */
+-		ret = zram_read_from_zspool(zram, page, index);
+-		zram_slot_unlock(zram, index);
++		if (zram_sddc_slot_allocated_locked(zram, index)) {
++			zram_slot_unlock(zram, index);
++			ret = zram_sddc_read_page(zram, page, index);
++			if (ret == -EAGAIN) {
++				goto retry;
++			}
++		} else {
++			/* Slot should be locked through out the function call */
++			ret = zram_read_from_zspool(zram, page, index);
++			zram_slot_unlock(zram, index);
++		}
+ 	} else {
+ 		/*
+ 		 * The slot should be unlocked before reading from the backing
+@@ -1442,6 +1491,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
+ 	struct zcomp_strm *zstrm;
+ 	unsigned long element = 0;
+ 	enum zram_pageflags flags = 0;
++	struct zram_sddc_job_key sddc_key = { };
+ 
+ 	mem = kmap_atomic(page);
+ 	if (page_same_filled(mem, &element)) {
+@@ -1551,10 +1601,11 @@ out:
+ 		zram_set_handle(zram, index, handle);
+ 		zram_set_obj_size(zram, index, comp_len);
+ 	}
+-	zram_slot_unlock(zram, index);
+-
+-	/* Update stats */
++	zram_sddc_slot_stored_locked(zram, index);
++	zram_sddc_job_key_locked(zram, index, &sddc_key);
+ 	atomic64_inc(&zram->stats.pages_stored);
++	zram_slot_unlock(zram, index);
++	zram_sddc_queue_observation(zram, &sddc_key);
+ 	return ret;
+ }
+ 
+@@ -1839,7 +1890,8 @@ static ssize_t recompress_store(struct device *dev,
+ 		if (zram_test_flag(zram, index, ZRAM_WB) ||
+ 		    zram_test_flag(zram, index, ZRAM_UNDER_WB) ||
+ 		    zram_test_flag(zram, index, ZRAM_SAME) ||
+-		    zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
++		    zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE) ||
++		    zram_sddc_slot_managed_locked(zram, index))
+ 			goto next;
+ 
+ 		err = zram_recompress(zram, index, page, threshold,
+@@ -2026,6 +2078,8 @@ static void zram_destroy_comps(struct zram *zram)
+ 
+ static void zram_reset_device(struct zram *zram)
+ {
++	mutex_lock(&zram->sddc_lifecycle_lock);
++	zram_sddc_stop(zram);
+ 	down_write(&zram->init_lock);
+ 
+ 	zram->limit_pages = 0;
+@@ -2042,6 +2096,7 @@ static void zram_reset_device(struct zram *zram)
+ 
+ 	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
+ 	up_write(&zram->init_lock);
++	mutex_unlock(&zram->sddc_lifecycle_lock);
+ }
+ 
+ static ssize_t disksize_store(struct device *dev,
+@@ -2057,6 +2112,7 @@ static ssize_t disksize_store(struct device *dev,
+ 	if (!disksize)
+ 		return -EINVAL;
+ 
++	mutex_lock(&zram->sddc_lifecycle_lock);
+ 	down_write(&zram->init_lock);
+ 	if (init_done(zram)) {
+ 		pr_info("Cannot change disksize for initialized device\n");
+@@ -2085,9 +2141,15 @@ static ssize_t disksize_store(struct device *dev,
+ 		zram->comps[prio] = comp;
+ 		zram->num_active_comps++;
+ 	}
++
++	err = zram_sddc_create(zram, disksize >> PAGE_SHIFT);
++	if (err)
++		goto out_free_comps;
++
+ 	zram->disksize = disksize;
+ 	set_capacity_and_notify(zram->disk, zram->disksize >> SECTOR_SHIFT);
+ 	up_write(&zram->init_lock);
++	mutex_unlock(&zram->sddc_lifecycle_lock);
+ 
+ 	return len;
+ 
+@@ -2096,6 +2158,7 @@ out_free_comps:
+ 	zram_meta_free(zram, disksize);
+ out_unlock:
+ 	up_write(&zram->init_lock);
++	mutex_unlock(&zram->sddc_lifecycle_lock);
+ 	return err;
+ }
+ 
+@@ -2200,6 +2263,9 @@ static struct attribute *zram_disk_attrs[] = {
+ 	&dev_attr_bd_stat.attr,
+ #endif
+ 	&dev_attr_debug_stat.attr,
++#ifdef CONFIG_ZRAM_SDDC
++	&dev_attr_sddc_stat.attr,
++#endif
+ #ifdef CONFIG_ZRAM_MULTI_COMP
+ 	&dev_attr_recomp_algorithm.attr,
+ 	&dev_attr_recompress.attr,
+@@ -2228,6 +2294,8 @@ static int zram_add(void)
+ 	device_id = ret;
+ 
+ 	init_rwsem(&zram->init_lock);
++	spin_lock_init(&zram->sddc_lock);
++	mutex_init(&zram->sddc_lifecycle_lock);
+ #ifdef CONFIG_ZRAM_WRITEBACK
+ 	spin_lock_init(&zram->wb_limit_lock);
+ #endif
+diff --git a/drivers/block/zram/zram_drv.h b/drivers/block/zram/zram_drv.h
+index 35e322144629224741c922618123ab5847023b79..da4e3fdb7769f5d4b8e210baced089f0dfe072fd 100644
+--- a/drivers/block/zram/zram_drv.h
++++ b/drivers/block/zram/zram_drv.h
+@@ -16,10 +16,13 @@
+ #define _ZRAM_DRV_H_
+ 
+ #include <linux/rwsem.h>
++#include <linux/mutex.h>
++#include <linux/spinlock.h>
+ #include <linux/zsmalloc.h>
+ #include <linux/crypto.h>
+ 
+ #include "zcomp.h"
++#include "sddc/zram_sddc.h"
+ 
+ #define SECTORS_PER_PAGE_SHIFT	(PAGE_SHIFT - SECTOR_SHIFT)
+ #define SECTORS_PER_PAGE	(1 << SECTORS_PER_PAGE_SHIFT)
+@@ -106,6 +109,10 @@ struct zram_stats {
+ struct zram {
+ 	struct zram_table_entry *table;
+ 	struct zs_pool *mem_pool;
++	struct zram_sddc *sddc;
++	/* Protect manager publication/admission and serialize reset/create. */
++	spinlock_t sddc_lock;
++	struct mutex sddc_lifecycle_lock;
+ 	struct zcomp *comps[ZRAM_MAX_COMPS];
+ 	struct gendisk *disk;
+ 	/* Prevent concurrent execution of device init */

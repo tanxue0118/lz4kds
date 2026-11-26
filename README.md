@@ -123,11 +123,10 @@ export ANDROID_CLANG=/path/to/clang-r*/bin
 
 ## GitHub Actions 构建 ACK zram.ko
 
-进入 [Build AOSP ACK zram.ko](https://github.com/tanxue0118/lz4kds/actions/workflows/build.yml)，点击 **Run workflow**，选择 ACK manifest 分支。默认 `common-android15-6.6`，可选 `common-android14-6.1` 和 `common-android16-6.12`。工作流或 ACK 补丁推送到主分支时，也会用默认的 6.6 基线自动构建。
+进入 [Build ACK 6.6 LZ4KDS](https://github.com/tanxue0118/lz4kds/actions/workflows/build.yml)，点击 **Run workflow**。当前补丁适配 `android15-6.6` 的 `329f9ae`，构建 ARM64 4 KiB 页的 `zram.ko`。
 
-- `zram-<manifest 分支>-baseline` 提供官方 ACK 构建的标准 `zram.ko`。当前仓库还没有 ACK SDDC 补丁。
-- 对应的 `patches/ack/<manifest 分支>/` 加入 `0001-*.patch`、`0002-*.patch` 等补丁后，Actions 按文件名顺序应用，再上传 `zram-<manifest 分支>-patched`。补丁中的路径以 ACK `common` 仓库根目录为准，例如 `drivers/block/zram/zram_drv.c`。需要将 SDDC 编入产物时，同时提交功能实现和实际构建使用的配置。
-- KO 随附固定到本次提交的 manifest、ACK 提交、补丁 SHA-256 和产物 SHA-256。`ack-build-diagnostics` 保存构建信息与日志。
+- 提交附带完整的 ACK 6.6 LZ4KDS 补丁时，Actions 会生成 `zram-<manifest 分支>-patched`，并在 UML 上运行 `zram-sddc-*` KUnit。当前补丁是 ACK 6.6 首版接入；设备读回、alias/delta 实际命中仍需启动相应测试内核验证。
+- KO 随附本次 manifest、ACK 提交、补丁 SHA-256 和产物 SHA-256；`ack-build-diagnostics` 保存编译及 KUnit 日志。
 
 产物用于当前 ACK 构建的开发验证。目标设备模块加载、数据读回和侧载打包见 [ACK 自建指南](docs/build-own-zram.md)。既有设备侧载流程仍使用本地流水线和设备取证目录。
 

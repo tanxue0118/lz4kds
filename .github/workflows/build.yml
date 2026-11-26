@@ -1,18 +1,14 @@
-name: Build AOSP ACK zram.ko
+name: Build ACK 6.6 LZ4KDS
 
 on:
   workflow_dispatch:
     inputs:
-      manifest_branch:
-        description: 'AOSP ACK manifest 分支（ARM64 / 4 KiB）'
-        type: choice
-        default: common-android15-6.6
-        options:
-          - common-android14-6.1
-          - common-android15-6.6
-          - common-android16-6.12
+      ack_commit:
+        description: 'ACK android15-6.6 kernel/common 提交'
+        type: string
+        default: 329f9ae918a9e18da3c488e531adf9b7995e2aae
   push:
-    branches: [main]
+    branches: [main, ack-lz4kds-ci]
     paths:
       - '.github/workflows/build.yml'
       - 'patches/ack/**'
@@ -21,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ack-zram-${{ github.ref }}-${{ inputs.manifest_branch || 'common-android15-6.6' }}
+  group: ack-zram-${{ github.ref }}-${{ inputs.ack_commit || '329f9ae918a9e18da3c488e531adf9b7995e2aae' }}
   cancel-in-progress: true
 
 jobs:
@@ -30,7 +26,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      ACK_BRANCH: ${{ inputs.manifest_branch || 'common-android15-6.6' }}
+      ACK_BRANCH: common-android15-6.6
+      ACK_COMMIT: ${{ inputs.ack_commit || '329f9ae918a9e18da3c488e531adf9b7995e2aae' }}
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
@@ -52,7 +49,7 @@ jobs:
           } >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/bin" "$ACK_ROOT" "$BUILD_INFO" "$DIST" "$ARTIFACT"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bc bison flex libc6-dev libelf-dev libssl-dev
+          sudo apt-get install -y -qq bc bison flex libc6-dev libelf-dev libssl-dev libncurses-dev binutils file
           curl --fail --show-error --silent --location --retry 3 \
             --output "$RUNNER_TEMP/bin/repo" https://storage.googleapis.com/git-repo-downloads/repo
           chmod +x "$RUNNER_TEMP/bin/repo"
@@ -66,31 +63,43 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest \
             -b "$ACK_BRANCH" --depth=1 --no-tags
           repo sync -c --no-tags --fail-fast -j4
+          [[ $ACK_COMMIT =~ ^[0-9a-f]{40}$ ]]
+          git -C common fetch --depth=1 https://android.googlesource.com/kernel/common "$ACK_COMMIT"
+          git -C common checkout --detach FETCH_HEAD
+          actual=$(git -C common rev-parse HEAD)
+          if [[ $actual != "$ACK_COMMIT" ]]; then
+            echo "::error::ACK commit mismatch: expected $ACK_COMMIT got $actual"
+            exit 1
+          fi
           repo manifest -r -o "$BUILD_INFO/manifest.xml"
-          git -C common rev-parse HEAD > "$BUILD_INFO/ack-commit.txt"
+          printf '%s\n' "$actual" > "$BUILD_INFO/ack-commit.txt"
           df -h .
 
-      - name: Apply optional ACK patches
+      - name: Apply ACK LZ4KDS patches
         id: patches
         shell: bash
         run: |
           export LC_ALL=C
           shopt -s nullglob
           patches=("$GITHUB_WORKSPACE/patches/ack/$ACK_BRANCH/"*.patch)
-          variant=baseline
-          : > "$BUILD_INFO/patches.sha256"
-          if (( ${#patches[@]} )); then
-            variant=patched
-            for patch in "${patches[@]}"; do
-              printf 'Applying %s\n' "${patch##*/}"
-              git -C "$ACK_ROOT/common" apply --index "$patch"
-              (cd "$(dirname "$patch")" && sha256sum "${patch##*/}") >> "$BUILD_INFO/patches.sha256"
-            done
-            git -C "$ACK_ROOT/common" diff --cached --check
+          if (( ${#patches[@]} == 0 )); then
+            echo "::error::No ACK LZ4KDS patch set found for $ACK_BRANCH"
+            exit 1
           fi
+          variant=patched
+          : > "$BUILD_INFO/patches.sha256"
+          for patch in "${patches[@]}"; do
+            printf 'Checking %s\n' "${patch##*/}"
+            git -C "$ACK_ROOT/common" apply --check "$patch"
+            printf 'Applying %s\n' "${patch##*/}"
+            git -C "$ACK_ROOT/common" apply --index "$patch"
+            (cd "$(dirname "$patch")" && sha256sum "${patch##*/}") >> "$BUILD_INFO/patches.sha256"
+          done
+          grep -Fx 'CONFIG_ZRAM_SDDC=y' "$ACK_ROOT/common/arch/arm64/configs/gki_defconfig"
+          grep -Fx 'CONFIG_ZRAM_DEF_COMP_LZ4KDS=y' "$ACK_ROOT/common/arch/arm64/configs/gki_defconfig"
           printf 'variant=%s\n' "$variant" >> "$GITHUB_OUTPUT"
-          printf 'manifest_branch=%s\nvariant=%s\nproject_commit=%s\n' \
-            "$ACK_BRANCH" "$variant" "$GITHUB_SHA" > "$BUILD_INFO/build.txt"
+          printf 'ack_branch=%s\nack_commit=%s\nvariant=%s\nproject_commit=%s\n' \
+            "$ACK_BRANCH" "$ACK_COMMIT" "$variant" "$GITHUB_SHA" > "$BUILD_INFO/build.txt"
 
       - name: Build ARM64 GKI with Kleaf
         shell: bash
@@ -99,10 +108,8 @@ jobs:
           tools/bazel run //common:kernel_aarch64_dist -- --destdir="$DIST" \
             2>&1 | tee "$BUILD_INFO/build.log"
 
-      - name: Collect zram.ko and build metadata
+      - name: Verify zram.ko contains LZ4KDS
         shell: bash
-        env:
-          VARIANT: ${{ steps.patches.outputs.variant }}
         run: |
           find "$DIST" -type f -name zram.ko -print > "$BUILD_INFO/zram-paths.txt"
           mapfile -t modules < "$BUILD_INFO/zram-paths.txt"
@@ -110,13 +117,24 @@ jobs:
             echo "::error::Expected exactly one zram.ko in the Kleaf dist; found ${#modules[@]}"
             exit 1
           fi
-          cp "${modules[0]}" "$ARTIFACT/zram.ko"
+          ko=${modules[0]}
+          file "$ko" | tee "$BUILD_INFO/ko-file.txt"
+          readelf -h "$ko" > "$BUILD_INFO/ko-elf-header.txt"
+          grep -E "Machine:[[:space:]]+AArch64" "$BUILD_INFO/ko-elf-header.txt"
+          strings "$ko" | grep -Fx 'lz4kds' > /dev/null
+          nm --defined-only "$ko" > "$BUILD_INFO/ko-symbols.txt"
+          for symbol in zram_sddc_create zram_sddc_read_page \
+              crystal_lz4kd_encode crystal_lz4kd_decode \
+              crystal_lz4kd_encode_delta crystal_lz4kd_decode_delta; do
+            awk '{print $NF}' "$BUILD_INFO/ko-symbols.txt" | grep -Fx "$symbol"
+          done
+          cp "$ko" "$ARTIFACT/zram.ko"
           cp "$BUILD_INFO/"{manifest.xml,ack-commit.txt,patches.sha256,build.txt} "$ARTIFACT/"
           (cd "$ARTIFACT" && sha256sum zram.ko > zram.ko.sha256)
           {
-            printf '### ACK zram.ko\n\n- Manifest: `%s`\n- ACK commit: `%s`\n- Variant: `%s`\n' \
-              "$ACK_BRANCH" "$(<"$BUILD_INFO/ack-commit.txt")" "$VARIANT"
-            printf '\n此产物对应本次 ACK 构建，真机兼容性和运行时读回需单独验证。\n'
+            printf '### ACK LZ4KDS zram.ko\n\n- Manifest: `%s`\n- ACK commit: `%s`\n- Variant: patched\n' \
+              "$ACK_BRANCH" "$(<"$BUILD_INFO/ack-commit.txt")"
+            printf '\nVerified module contains the LZ4KDS name, SDDC manager/read path, and LZ4KD delta codec. Device boot/readback remains separate.\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload zram.ko
@@ -126,6 +144,30 @@ jobs:
           path: ${{ env.ARTIFACT }}/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Run LZ4KDS KUnit on UML
+        if: steps.patches.outputs.variant == 'patched' && env.ACK_BRANCH == 'common-android15-6.6'
+        shell: bash
+        run: |
+          cd "$ACK_ROOT/common"
+          cat > "$RUNNER_TEMP/lz4kds.kunitconfig" <<'EOF'
+          CONFIG_KUNIT=y
+          CONFIG_BLOCK=y
+          CONFIG_SYSFS=y
+          CONFIG_64BIT=y
+          CONFIG_ZRAM=y
+          CONFIG_ZRAM_SDDC=y
+          CONFIG_ZRAM_SDDC_KUNIT_TEST=y
+          CONFIG_CRYPTO_LZO=y
+          CONFIG_CRYPTO_LZ4=y
+          CONFIG_CRYPTO_ZSTD=y
+          EOF
+          python3 tools/testing/kunit/kunit.py run \
+            --arch=um \
+            --kunitconfig="$RUNNER_TEMP/lz4kds.kunitconfig" \
+            --build_dir="$RUNNER_TEMP/kunit-build" \
+            --jobs=4 \
+            --json="$BUILD_INFO/kunit.json" 'zram-sddc-*' 2>&1 | tee "$BUILD_INFO/kunit.log"
 
       - name: Upload build diagnostics
         if: always()

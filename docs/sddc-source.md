@@ -29,11 +29,14 @@
 
 ---
 
-## 2. 代码来源
+## 2. 公开源码沿革
 
-- 华为 HiSilicon 的 LZ4K/LZ4KD codec 提供普通和 delta 编解码。各文件的版权和许可见源码头。
-- Crystal HybridSwap 在 zram 中增加相似流索引、不可变引用和 alias/delta 状态。Wcoom 仓库是 `whitewhale0612` 的 fork，提供一份公开的 Crystal 源码快照。
-- 当前工作区的两份变体分别取自 jkHXQ 的 RMX5010 适配和 2108282 的 houji 移植。设备适配、引用测试和运行结论按对应提交阅读。
+- **最早找到的公开 Crystal SDDC 实现**是 [`whitewhale0612` 提交 `8d64a0e`](https://github.com/whitewhale0612/android_kernel_common_oneplus_sm8750-C16/commit/8d64a0e7cd215403b536764f3df871320bce5c2f)，提交标题是 `crystal_hybridswap: port SDDC`。该提交首次加入 `crystal_sddc.c/.h`、`DESIGN.md`，并改动 Crystal 私有 zram 接点。**它本身是移植到 Crystal HybridSwap 的实现，不是未经移植的 Huawei SDDC 原版。**目前找到的公开材料没有提供单独、未移植的 Huawei SDDC 源码树。
+- **LZ4KD codec 是独立来源。** 前序 [`whitewhale0612` 提交 `a276cf1`](https://github.com/whitewhale0612/android_kernel_common_oneplus_sm8750-C16/commit/a276cf10e7d122d89ef6ac0d44a6057de0b1185d) 将 LZ4KD 普通与 delta codec 接入 Crystal。codec 源文件头注明 Huawei Technologies Co., Ltd. 2022，并带有 `BSD-3-Clause OR GPL-2.0`。
+- [`Wcoom/oneplus_sm8750_kernel`](https://github.com/Wcoom/oneplus_sm8750_kernel) 是 whitewhale 内核仓库的 fork，可按上述提交查看同一公开代码及后续变化；它不是独立的 Huawei 原始仓库。
+- [`2108282` houji 6.1 移植](https://github.com/2108282/zram-lz4kds-sddc-houji-6.1/commit/9b223f005da12d39167515c37828395f412e31f9) 是后续设备适配版，含 6.1 改动、DESIGN、KUnit 及其维护更新。
+
+多内核版本移植可从首次公开 Crystal 快照开始，逐个适配 zram hooks；保留 houji 版的 KUnit、DESIGN 和后续修复作对照。
 
 ---
 
