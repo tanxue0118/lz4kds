@@ -105,8 +105,30 @@ jobs:
         shell: bash
         working-directory: ${{ env.ACK_ROOT }}
         run: |
-          tools/bazel run //common:kernel_aarch64_dist -- --destdir="$DIST" \
+          tools/bazel run \
+            --//build/kernel/kleaf:preserve_kbuild_output=true \
+            //common:kernel_aarch64_dist -- --destdir="$DIST" \
             2>&1 | tee "$BUILD_INFO/build.log"
+          BAZEL_BIN="$(tools/bazel info bazel-bin)"
+          CONFIG="$BAZEL_BIN/common/kernel_aarch64/kbuild_output/.config"
+          if [[ ! -s "$CONFIG" ]]; then
+            echo "::error::Kleaf did not preserve the kernel_aarch64 .config at $CONFIG"
+            exit 1
+          fi
+          cp "$CONFIG" "$BUILD_INFO/kernel-aarch64.config"
+          assert_kernel_config() {
+            if ! grep -Fqx -- "$1" "$CONFIG"; then
+              echo "::error::Kleaf .config is missing: $1"
+              exit 1
+            fi
+          }
+          assert_kernel_config 'CONFIG_ARM64=y'
+          assert_kernel_config 'CONFIG_64BIT=y'
+          assert_kernel_config 'CONFIG_ARM64_4K_PAGES=y'
+          assert_kernel_config 'CONFIG_ZRAM=m'
+          assert_kernel_config 'CONFIG_ZRAM_SDDC=y'
+          assert_kernel_config 'CONFIG_ZRAM_DEF_COMP_LZ4KDS=y'
+          assert_kernel_config 'CONFIG_ZRAM_DEF_COMP="lz4kds"'
 
       - name: Verify zram.ko contains LZ4KDS
         shell: bash
@@ -154,6 +176,7 @@ jobs:
           CONFIG_KUNIT=y
           CONFIG_BLOCK=y
           CONFIG_SYSFS=y
+          CONFIG_CRYPTO=y
           CONFIG_64BIT=y
           CONFIG_ZRAM=y
           CONFIG_ZRAM_SDDC=y
