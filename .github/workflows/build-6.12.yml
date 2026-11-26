@@ -12,6 +12,7 @@ on:
     paths:
       - '.github/workflows/build-6.12.yml'
       - 'patches/ack/common-android16-6.12/**'
+      - 'patches/ack/common-android16-6.12-kmi6/**'
 
 permissions:
   contents: read
@@ -92,7 +93,7 @@ jobs:
         id: patches
         shell: bash
         env:
-          PATCH_DIR: ${{ github.workspace }}/patches/ack/common-android16-6.12
+          PATCH_DIR: ${{ github.workspace }}/patches/ack/common-android16-6.12-kmi6
         run: |
           export LC_ALL=C
           shopt -s nullglob
@@ -155,26 +156,23 @@ jobs:
           echo '--- ours ---'; cat "$BUILD_INFO/zram-order-ours.txt"
           echo '--- reference savedefconfig ---'; cat "$BUILD_INFO/zram-order-ref.txt"
 
-          # Every ZRAM symbol we add must appear in the reference output, and the
-          # mutual order of the symbols present in both must be identical.
-          missing=$(comm -23 "$BUILD_INFO/zram-order-ours.txt" \
-                             "$BUILD_INFO/zram-order-ref.txt" | tr '\n' ' ')
-          if [ -n "$missing" ]; then
-            echo "::error::ZRAM symbols in gki_defconfig are not valid here: $missing"
-            exit 1
-          fi
-          # Verify the relative order explicitly against the reference file.
+          # Compare as ordered lists in Python; comm requires lexical sorting,
+          # while savedefconfig uses Kconfig definition order.
           python3 - "$BUILD_INFO/zram-order-ours.txt" "$BUILD_INFO/zram-order-ref.txt" <<'PY'
           import sys
 
-          ours = [l.strip() for l in open(sys.argv[1]) if l.strip()]
-          ref = [l.strip() for l in open(sys.argv[2]) if l.strip()]
-          refpos = {s: i for i, s in enumerate(ref)}
-          seq = [refpos[s] for s in ours if s in refpos]
-          if seq != sorted(seq):
+          ours = [line.strip() for line in open(sys.argv[1]) if line.strip()]
+          ref = [line.strip() for line in open(sys.argv[2]) if line.strip()]
+          refpos = {symbol: index for index, symbol in enumerate(ref)}
+          missing = [symbol for symbol in ours if symbol not in refpos]
+          if missing:
+              print(f'::error::ZRAM symbols are not in savedefconfig: {missing}')
+              sys.exit(1)
+          positions = [refpos[symbol] for symbol in ours]
+          if positions != sorted(positions):
               print(f'::error::ZRAM entries are out of savedefconfig order: {ours}')
-              for s in ours:
-                  print(f'   {s} -> reference position {refpos.get(s, "absent")}')
+              for symbol in ours:
+                  print(f'   {symbol} -> reference position {refpos[symbol]}')
               sys.exit(1)
           print(f'ZRAM entries follow savedefconfig order: {ours}')
           PY
