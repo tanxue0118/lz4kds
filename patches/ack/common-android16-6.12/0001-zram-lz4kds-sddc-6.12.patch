@@ -735,7 +735,7 @@ diff --git a/drivers/block/zram/sddc/zram_sddc.c b/drivers/block/zram/sddc/zram_
 new file mode 100644
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc.c
-@@ -0,0 +1,3118 @@
+@@ -0,0 +1,3137 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include <linux/atomic.h>
@@ -1465,17 +1465,21 @@ new file mode 100644
 +	    key->size > PAGE_SIZE)
 +		return false;
 +	/*
-+	 * 6.12 dropped ZRAM_UNDER_WB.  The 6.6 flag marked "a writeback bio is
-+	 * in flight, its zs object is still owned by the slot".  That window is
-+	 * already covered here: every caller of this helper holds the slot lock,
-+	 * and both the writeback completion and the prefetch-cache reuse that
-+	 * change the handle do so under the same lock, so the handle/size/prio
-+	 * comparisons above cannot straddle the change.  On top of that
-+	 * zram_sddc_commit_target() re-validates the job key before committing,
-+	 * so a slot that changed underneath us is rejected, not converted.
++	 * 6.12 dropped ZRAM_UNDER_WB, so translate it instead of dropping the
++	 * check.  In 6.6 writeback_store() set ZRAM_UNDER_WB and released the
++	 * slot lock *before* ZRAM_WB was set (that only happened after the bio
++	 * completed), i.e. the flag covered "post-processing owns this slot's
++	 * zs object but the slot lock is not held".  Checking ZRAM_WB alone
++	 * does not cover that window.  In 6.12 the same window is spelled
++	 * ZRAM_PP_SLOT: scan_slots_for_writeback()/recompress set it under the
++	 * slot lock, the lock is dropped for the I/O, and ZRAM_WB is set only
++	 * on completion.  Converting a slot in that window would let
++	 * zram_writeback_complete()/recompress_slot() zs_free() a handle this
++	 * manager already replaced, so such slots must stay ineligible.
 +	 */
 +	if (zram_sddc_test_flag(zram, key->index, ZRAM_SAME) ||
-+	    zram_sddc_test_flag(zram, key->index, ZRAM_WB))
++	    zram_sddc_test_flag(zram, key->index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, key->index, ZRAM_PP_SLOT))
 +		return false;
 +
 +	return key->prio == ZRAM_PRIMARY_COMP &&
@@ -1738,9 +1742,12 @@ new file mode 100644
 +
 +	zram_sddc_slot_lock(zram, candidate->index);
 +	state_entry = zram_sddc_state_load_raw(sddc, candidate->index);
++	/* ZRAM_PP_SLOT replaces 6.6's ZRAM_UNDER_WB here; see
++	 * zram_sddc_job_matches_locked() for the mapping rationale. */
 +	if (state_entry == XA_ZERO_ENTRY || xa_is_err(state_entry) ||
 +	    zram_sddc_test_flag(zram, candidate->index, ZRAM_SAME) ||
-+	    zram_sddc_test_flag(zram, candidate->index, ZRAM_WB))
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_PP_SLOT))
 +		goto unlock;
 +
 +	state = state_entry;
@@ -1848,8 +1855,11 @@ new file mode 100644
 +	if (state_entry == XA_ZERO_ENTRY || xa_is_err(state_entry))
 +		goto unlock;
 +	state = state_entry;
++	/* ZRAM_PP_SLOT replaces 6.6's ZRAM_UNDER_WB; see
++	 * zram_sddc_job_matches_locked() for the mapping rationale. */
 +	if (zram_sddc_test_flag(zram, candidate->index, ZRAM_SAME) ||
-+	    zram_sddc_test_flag(zram, candidate->index, ZRAM_WB))
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, candidate->index, ZRAM_PP_SLOT))
 +		goto unlock;
 +
 +	source->key.index = candidate->index;
@@ -1924,7 +1934,8 @@ new file mode 100644
 +	    zram_sddc_obj_size(zram, source->key.index) != source->key.size ||
 +	    zram_sddc_priority(zram, source->key.index) != source->key.prio ||
 +	    zram_sddc_test_flag(zram, source->key.index, ZRAM_SAME) ||
-+	    zram_sddc_test_flag(zram, source->key.index, ZRAM_WB))
++	    zram_sddc_test_flag(zram, source->key.index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, source->key.index, ZRAM_PP_SLOT))
 +		goto fail_unlock;
 +
 +	ref->handle = source->key.handle;
@@ -2742,9 +2753,12 @@ new file mode 100644
 +	 * owner will requeue the slot after aborting, so producers must not build
 +	 * keys that can only fail reservation admission. */
 +	state_entry = zram_sddc_state_load_raw(sddc, index);
++	/* ZRAM_PP_SLOT replaces 6.6's ZRAM_UNDER_WB; see
++	 * zram_sddc_job_matches_locked() for the mapping rationale. */
 +	if (state_entry ||
 +	    zram_sddc_test_flag(zram, index, ZRAM_SAME) ||
-+	    zram_sddc_test_flag(zram, index, ZRAM_WB))
++	    zram_sddc_test_flag(zram, index, ZRAM_WB) ||
++	    zram_sddc_test_flag(zram, index, ZRAM_PP_SLOT))
 +		return;
 +
 +	handle = zram->table[index].handle;
@@ -2953,7 +2967,12 @@ new file mode 100644
 +		return -EAGAIN;
 +	if (!state)
 +		return -EAGAIN;
-+	if (zram_sddc_test_flag(zram, index, ZRAM_WB))
++	/* !expected marks the speculative read path, which in 6.6 also rejected
++	 * ZRAM_UNDER_WB slots.  ZRAM_PP_SLOT is the 6.12 spelling; see
++	 * zram_sddc_job_matches_locked().  A pinned snapshot (expected != NULL)
++	 * keeps its original, narrower contract. */
++	if (zram_sddc_test_flag(zram, index, ZRAM_WB) ||
++	    (!expected && zram_sddc_test_flag(zram, index, ZRAM_PP_SLOT)))
 +		return -EAGAIN;
 +
 +	*kind = state->kind;
