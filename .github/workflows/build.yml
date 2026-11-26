@@ -150,13 +150,18 @@ jobs:
               crystal_lz4kd_encode_delta crystal_lz4kd_decode_delta; do
             awk '{print $NF}' "$BUILD_INFO/ko-symbols.txt" | grep -Fx "$symbol"
           done
+          cp "$ko" "$ARTIFACT/zram-android15-6.6.ko"
           cp "$ko" "$ARTIFACT/zram.ko"
           cp "$BUILD_INFO/"{manifest.xml,ack-commit.txt,patches.sha256,build.txt} "$ARTIFACT/"
-          (cd "$ARTIFACT" && sha256sum zram.ko > zram.ko.sha256)
+          (
+            cd "$ARTIFACT"
+            sha256sum zram-android15-6.6.ko > zram-android15-6.6.ko.sha256
+            sha256sum zram.ko > zram.ko.sha256
+          )
           {
             printf '### ACK LZ4KDS zram.ko\n\n- Manifest: `%s`\n- ACK commit: `%s`\n- Variant: patched\n' \
               "$ACK_BRANCH" "$(<"$BUILD_INFO/ack-commit.txt")"
-            printf '\nVerified module contains the LZ4KDS name, SDDC manager/read path, and LZ4KD delta codec. Device boot/readback remains separate.\n'
+            printf '\nArtifact includes `zram-android15-6.6.ko` (version-labelled handoff) and `zram.ko` (module-template filename), with SHA-256 files for both. Device boot/readback remains separate.\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload zram.ko

@@ -126,7 +126,7 @@ export ANDROID_CLANG=/path/to/clang-r*/bin
 进入 [Build ACK 6.6 LZ4KDS](https://github.com/tanxue0118/lz4kds/actions/workflows/build.yml)，点击 **Run workflow**。当前补丁适配 `android15-6.6` 的 `329f9ae`，构建 ARM64 4 KiB 页的 `zram.ko`。
 
 - 提交附带完整的 ACK 6.6 LZ4KDS 补丁时，Actions 会生成 `zram-<manifest 分支>-patched`，并在 UML 上运行 `zram-sddc-*` KUnit。当前补丁是 ACK 6.6 首版接入；设备读回、alias/delta 实际命中仍需启动相应测试内核验证。
-- KO 随附本次 manifest、ACK 提交、补丁 SHA-256 和产物 SHA-256；`ack-build-diagnostics` 保存编译及 KUnit 日志。
+- 本地交接文件：`dist/zram-android15-6.6.ko`；Actions artifact 同时提供同内容 `zram.ko` 与两个名称各自的 SHA-256 文件。
 
 产物用于当前 ACK 构建的开发验证。目标设备模块加载、数据读回和侧载打包见 [ACK 自建指南](docs/build-own-zram.md)。既有设备侧载流程仍使用本地流水线和设备取证目录。
 
@@ -141,13 +141,13 @@ lz4kds_sidecar/
 ├── post-fs-data.sh
 ├── service.sh
 ├── uninstall.sh
-├── zram.ko                 ← dist/zram 内核.ko 改名放入
+├── zram.ko                 ← Actions artifact 内同内容副本，或用 zram-android15-6.6.ko 改名
 ├── zram.ko.sha256          ← customize.sh 安装时生成
 └── stock/
     └── zram.ko             ← 目标设备原厂 KO，回滚用
 ```
 
-可以从 `模块模板/小米/` 复制脚本和 `module.prop`，再按上面补入两个 KO 后压缩目录内容。模板根目录自身没有 `stock/zram.ko`。ACK 构建 KO 的目标架构为 ARM64、页大小 4 KiB；改文件名只满足包内文件名要求，不会改变模块 ABI 或替代真机加载验证。
+可以从 `模块模板/小米/` 复制脚本和 `module.prop`，再按上面补入两个 KO 后压缩目录内容。模板根目录自身没有 `stock/zram.ko`。`zram-android15-6.6.ko` 是按 ACK 内核版本命名的交接文件；小米模板脚本按 `zram.ko` 查找。Actions artifact 同时附有可直接使用的 `zram.ko` 副本；若使用版本化文件，打包时改名即可。改名只改变文件名，不改变模块 ABI。
 
 ## 四、最快用法
 
