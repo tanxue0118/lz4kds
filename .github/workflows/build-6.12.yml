@@ -1,0 +1,207 @@
+name: Build ACK 6.12 LZ4KDS zram
+
+on:
+  workflow_dispatch:
+    inputs:
+      ack_commit:
+        description: 'ACK android16-6.12 kernel/common 提交（留空用分支 HEAD）'
+        type: string
+        default: ''
+  push:
+    branches: [main, ack-lz4kds-ci, ack-lz4kds-6.12]
+    paths:
+      - '.github/workflows/build-6.12.yml'
+      - 'patches/ack/common-android16-6.12/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ack-zram-612-${{ github.ref }}-${{ inputs.ack_commit || 'head' }}
+  cancel-in-progress: true
+
+env:
+  ACK_BRANCH: common-android16-6.12
+  ACK_KERNEL_BRANCH: android16-6.12
+  ACK_PINNED: '062f50e2f6f1479285e1f7a82e3b30115d4f5ab0'
+
+jobs:
+  build:
+    name: Build ARM64 ACK 6.12 zram
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare paths and host dependencies
+        shell: bash
+        run: |
+          ACK_ROOT="$RUNNER_TEMP/ack"
+          BUILD_INFO="$RUNNER_TEMP/ack-build-info"
+          DIST="$RUNNER_TEMP/ack-dist"
+          ARTIFACT="$RUNNER_TEMP/ack-zram-artifact"
+          {
+            printf 'ACK_ROOT=%s\n' "$ACK_ROOT"
+            printf 'BUILD_INFO=%s\n' "$BUILD_INFO"
+            printf 'DIST=%s\n' "$DIST"
+            printf 'ARTIFACT=%s\n' "$ARTIFACT"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/bin" "$ACK_ROOT" "$BUILD_INFO" "$DIST" "$ARTIFACT"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libc6-dev libelf-dev libssl-dev \
+            libncurses-dev binutils file cpio rsync
+          curl --fail --show-error --silent --location --retry 3 \
+            --output "$RUNNER_TEMP/bin/repo" \
+            https://storage.googleapis.com/git-repo-downloads/repo
+          chmod +x "$RUNNER_TEMP/bin/repo"
+          printf '%s\n' "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          df -h "$ACK_ROOT"
+
+      - name: Sync ACK 6.12 and its Kleaf toolchain
+        shell: bash
+        working-directory: ${{ env.ACK_ROOT }}
+        run: |
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b "$ACK_BRANCH" --depth=1 --no-tags
+          repo sync -c --no-tags --fail-fast -j4
+
+          want="${{ inputs.ack_commit }}"
+          [ -n "$want" ] || want="$ACK_PINNED"
+          if [[ $want =~ ^[0-9a-f]{40}$ ]]; then
+            git -C common fetch --depth=1 https://android.googlesource.com/kernel/common "$want"
+            git -C common checkout --detach FETCH_HEAD
+            actual=$(git -C common rev-parse HEAD)
+            if [[ $actual != "$want" ]]; then
+              echo "::error::ACK commit mismatch: expected $want got $actual"
+              exit 1
+            fi
+          else
+            echo "::error::invalid ACK commit '$want'"
+            exit 1
+          fi
+
+          repo manifest -r -o "$BUILD_INFO/manifest.xml"
+          printf '%s\n' "$(git -C common rev-parse HEAD)" > "$BUILD_INFO/ack-commit.txt"
+          git -C common describe --always --dirty >> "$BUILD_INFO/ack-commit.txt" || true
+          df -h .
+
+      - name: Apply LZ4KDS SDDC patch set
+        id: patches
+        shell: bash
+        env:
+          PATCH_DIR: ${{ github.workspace }}/patches/ack/common-android16-6.12
+        run: |
+          export LC_ALL=C
+          shopt -s nullglob
+          patches=("$PATCH_DIR"/*.patch)
+          if (( ${#patches[@]} == 0 )); then
+            echo "::error::No 6.12 LZ4KDS patch set found in $PATCH_DIR"
+            exit 1
+          fi
+          : > "$BUILD_INFO/patches.sha256"
+          for patch in "${patches[@]}"; do
+            printf 'Checking %s\n' "${patch##*/}"
+            git -C "$ACK_ROOT/common" apply --check -v "$patch"
+            printf 'Applying %s\n' "${patch##*/}"
+            git -C "$ACK_ROOT/common" apply --index "$patch"
+            (cd "$(dirname "$patch")" && sha256sum "${patch##*/}") >> "$BUILD_INFO/patches.sha256"
+          done
+          grep -Fx 'CONFIG_ZRAM_SDDC=y' "$ACK_ROOT/common/arch/arm64/configs/gki_defconfig"
+          grep -Fx 'CONFIG_ZRAM_DEF_COMP_LZ4KDS=y' "$ACK_ROOT/common/arch/arm64/configs/gki_defconfig"
+          git -C "$ACK_ROOT/common" diff --stat --cached | tee "$BUILD_INFO/diffstat.txt"
+          printf 'variant=patched\n' >> "$GITHUB_OUTPUT"
+
+      - name: Build ARM64 GKI with Kleaf
+        shell: bash
+        working-directory: ${{ env.ACK_ROOT }}
+        run: |
+          tools/bazel run \
+            --//build/kernel/kleaf:preserve_kbuild_output=true \
+            //common:kernel_aarch64_dist -- --destdir="$DIST" \
+            2>&1 | tee "$BUILD_INFO/build.log"
+          BAZEL_BIN="$(tools/bazel info bazel-bin)"
+          CONFIG="$BAZEL_BIN/common/kernel_aarch64/kbuild_output/.config"
+          if [[ ! -s "$CONFIG" ]]; then
+            echo "::error::Kleaf did not preserve the kernel_aarch64 .config at $CONFIG"
+            exit 1
+          fi
+          cp "$CONFIG" "$BUILD_INFO/kernel-aarch64.config"
+          assert_cfg() {
+            if ! grep -Fqx -- "$1" "$CONFIG"; then
+              echo "::error::Kleaf .config is missing: $1"
+              exit 1
+            fi
+          }
+          assert_cfg 'CONFIG_ARM64=y'
+          assert_cfg 'CONFIG_64BIT=y'
+          assert_cfg 'CONFIG_ARM64_4K_PAGES=y'
+          assert_cfg 'CONFIG_ZRAM=m'
+          assert_cfg 'CONFIG_ZRAM_SDDC=y'
+          assert_cfg 'CONFIG_ZRAM_DEF_COMP_LZ4KDS=y'
+          assert_cfg 'CONFIG_ZRAM_DEF_COMP="lz4kds"'
+
+      - name: Verify zram.ko carries LZ4KDS
+        shell: bash
+        run: |
+          find "$DIST" -type f -name zram.ko -print > "$BUILD_INFO/zram-paths.txt"
+          mapfile -t modules < "$BUILD_INFO/zram-paths.txt"
+          if (( ${#modules[@]} != 1 )); then
+            echo "::error::Expected exactly one zram.ko in the Kleaf dist; found ${#modules[@]}"
+            exit 1
+          fi
+          ko=${modules[0]}
+          file "$ko" | tee "$BUILD_INFO/ko-file.txt"
+          readelf -h "$ko" > "$BUILD_INFO/ko-elf-header.txt"
+          grep -E "Machine:[[:space:]]+AArch64" "$BUILD_INFO/ko-elf-header.txt"
+          modinfo "$ko" > "$BUILD_INFO/ko-modinfo.txt" || true
+          grep -E '^vermagic:' "$BUILD_INFO/ko-modinfo.txt" || true
+          strings "$ko" | grep -Fx 'lz4kds' > /dev/null
+          nm --defined-only "$ko" > "$BUILD_INFO/ko-symbols.txt"
+          for symbol in zram_sddc_create zram_sddc_read_page \
+              zcomp_supports_delta zcomp_compress_delta \
+              crystal_lz4kd_encode crystal_lz4kd_decode \
+              crystal_lz4kd_encode_delta crystal_lz4kd_decode_delta; do
+            if awk '{print $NF}' "$BUILD_INFO/ko-symbols.txt" | grep -Fxq "$symbol"; then
+              printf 'present  %s\n' "$symbol"
+            else
+              echo "::error::missing symbol in zram.ko: $symbol"
+              exit 1
+            fi
+          done
+          cp "$ko" "$ARTIFACT/zram-android16-6.12.ko"
+          cp "$ko" "$ARTIFACT/zram.ko"
+          cp "$BUILD_INFO"/{manifest.xml,ack-commit.txt,patches.sha256,diffstat.txt} "$ARTIFACT/"
+          (
+            cd "$ARTIFACT"
+            sha256sum zram-android16-6.12.ko > zram-android16-6.12.ko.sha256
+            sha256sum zram.ko > zram.ko.sha256
+          )
+          {
+            printf '### ACK 6.12 LZ4KDS zram.ko\n\n'
+            printf -- '- Manifest: `%s`\n' "$ACK_BRANCH"
+            printf -- '- ACK commit: `%s`\n' "$(<"$BUILD_INFO/ack-commit.txt" | head -1)"
+            printf -- '- KMI: `android16-6.12` / 4 KiB pages / arm64\n'
+            printf -- '- Vermagic: `%s`\n' "$(grep -E '^vermagic:' "$BUILD_INFO/ko-modinfo.txt" || echo '(unavailable)')"
+            printf '\nArtifact carries `zram-android16-6.12.ko` (version-labelled handoff) and `zram.ko` (Xiaomi module-template filename), plus SHA-256 for both.\n'
+            printf 'Drop `zram.ko` into the Xiaomi template root and the stock module into `stock/zram.ko` for rollback.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload zram.ko
+        uses: actions/upload-artifact@v4
+        with:
+          name: zram-${{ env.ACK_BRANCH }}-patched
+          path: ${{ env.ARTIFACT }}/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ack-6.12-build-diagnostics
+          path: ${{ env.BUILD_INFO }}/
+          if-no-files-found: ignore
+          retention-days: 7
