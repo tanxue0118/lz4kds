@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ack_commit:
-        description: 'ACK android16-6.12 kernel/common 提交（留空用分支 HEAD）'
+        description: 'ACK commit；留空使用 android16-6 KMI 基线 7d13456e459e1ed22794efad0898c8f6569c52f5'
         type: string
         default: ''
   push:
@@ -22,8 +22,8 @@ concurrency:
 
 env:
   ACK_BRANCH: common-android16-6.12
-  ACK_KERNEL_BRANCH: android16-6.12
-  ACK_PINNED: '062f50e2f6f1479285e1f7a82e3b30115d4f5ab0'
+  ACK_KERNEL_BRANCH: android16-6.12-2025-12
+  ACK_PINNED: '7d13456e459e1ed22794efad0898c8f6569c52f5'
 
 jobs:
   build:
@@ -230,6 +230,11 @@ jobs:
           grep -E "Machine:[[:space:]]+AArch64" "$BUILD_INFO/ko-elf-header.txt"
           modinfo "$ko" > "$BUILD_INFO/ko-modinfo.txt" || true
           grep -E '^vermagic:' "$BUILD_INFO/ko-modinfo.txt" || true
+          vermagic=$(sed -n 's/^vermagic:[[:space:]]*//p' "$BUILD_INFO/ko-modinfo.txt" | head -1)
+          if [[ ! $vermagic =~ android16-6([.-]|$) ]]; then
+            echo "::error::KMI mismatch: expected android16-6, got '$vermagic'"
+            exit 1
+          fi
           strings "$ko" | grep -Fx 'lz4kds' > /dev/null
           nm --defined-only "$ko" > "$BUILD_INFO/ko-symbols.txt"
           awk '{print $NF}' "$BUILD_INFO/ko-symbols.txt" \
@@ -248,28 +253,28 @@ jobs:
               exit 1
             fi
           done
-          cp "$ko" "$ARTIFACT/zram-android16-6.12.ko"
+          cp "$ko" "$ARTIFACT/zram-android16-6.12-kmi6.ko"
           cp "$ko" "$ARTIFACT/zram.ko"
           cp "$BUILD_INFO"/{manifest.xml,ack-commit.txt,patches.sha256,diffstat.txt} "$ARTIFACT/"
           (
             cd "$ARTIFACT"
-            sha256sum zram-android16-6.12.ko > zram-android16-6.12.ko.sha256
+            sha256sum zram-android16-6.12-kmi6.ko > zram-android16-6.12-kmi6.ko.sha256
             sha256sum zram.ko > zram.ko.sha256
           )
           {
             printf '### ACK 6.12 LZ4KDS zram.ko\n\n'
             printf -- '- Manifest: `%s`\n' "$ACK_BRANCH"
             printf -- '- ACK commit: `%s`\n' "$(<"$BUILD_INFO/ack-commit.txt" | head -1)"
-            printf -- '- KMI: `android16-6.12` / 4 KiB pages / arm64\n'
-            printf -- '- Vermagic: `%s`\n' "$(grep -E '^vermagic:' "$BUILD_INFO/ko-modinfo.txt" || echo '(unavailable)')"
-            printf '\nArtifact carries `zram-android16-6.12.ko` (version-labelled handoff) and `zram.ko` (Xiaomi module-template filename), plus SHA-256 for both.\n'
+            printf -- '- KMI: `android16-6.12` / generation `android16-6` / 4 KiB pages / arm64\n'
+            printf -- '- Vermagic: `%s`\n' "$vermagic"
+            printf '\nArtifact carries `zram-android16-6.12-kmi6.ko` and `zram.ko` (Xiaomi template filename), with SHA-256 for both.\n'
             printf 'Drop `zram.ko` into the Xiaomi template root and the stock module into `stock/zram.ko` for rollback.\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload zram.ko
         uses: actions/upload-artifact@v4
         with:
-          name: zram-${{ env.ACK_BRANCH }}-patched
+          name: zram-${{ env.ACK_BRANCH }}-kmi6
           path: ${{ env.ARTIFACT }}/
           if-no-files-found: error
           retention-days: 14
