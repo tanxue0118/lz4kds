@@ -557,11 +557,13 @@ diff --git a/drivers/block/zram/backend_lz4kds.c b/drivers/block/zram/backend_lz
 new file mode 100644
 --- /dev/null
 +++ b/drivers/block/zram/backend_lz4kds.c
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,159 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include <linux/kernel.h>
 +#include <linux/err.h>
++#include <linux/irqflags.h>
++#include <linux/slab.h>
 +
 +#include "backend_lz4kds.h"
 +
@@ -4058,10 +4060,11 @@ diff --git a/drivers/block/zram/sddc/zram_sddc_codec.c b/drivers/block/zram/sddc
 new file mode 100644
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc_codec.c
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,176 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include <linux/err.h>
++#include <linux/irqflags.h>
 +#include <linux/mm.h>
 +#include <linux/sizes.h>
 +#include <linux/slab.h>
@@ -4281,11 +4284,12 @@ diff --git a/drivers/block/zram/sddc/zram_sddc_codec_test.c b/drivers/block/zram
 new file mode 100644
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc_codec_test.c
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,283 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include <kunit/test.h>
 +#include <linux/err.h>
++#include <linux/irqflags.h>
 +#include <linux/mm.h>
 +#include <linux/string.h>
 +
