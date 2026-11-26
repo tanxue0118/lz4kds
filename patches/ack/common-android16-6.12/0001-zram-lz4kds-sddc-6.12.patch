@@ -1,15 +1,18 @@
 diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
 --- a/arch/arm64/configs/gki_defconfig
 +++ b/arch/arm64/configs/gki_defconfig
-@@ -359,6 +359,8 @@
+@@ -359,9 +359,11 @@
  # CONFIG_EFI_ARMSTUB_DTB_LOADER is not set
  CONFIG_GNSS=m
  CONFIG_ZRAM=m
 +CONFIG_ZRAM_SDDC=y
-+CONFIG_ZRAM_DEF_COMP_LZ4KDS=y
  CONFIG_ZRAM_BACKEND_LZ4=y
  CONFIG_ZRAM_BACKEND_ZSTD=y
  CONFIG_ZRAM_BACKEND_LZO=y
++CONFIG_ZRAM_DEF_COMP_LZ4KDS=y
+ CONFIG_ZRAM_WRITEBACK=y
+ CONFIG_ZRAM_MULTI_COMP=y
+ CONFIG_ZRAM_ANDROID_IOCTL=y
 diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
 --- a/drivers/block/zram/Kconfig
 +++ b/drivers/block/zram/Kconfig
