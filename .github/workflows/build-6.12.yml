@@ -117,10 +117,15 @@ jobs:
       # Kleaf enforces `savedefconfig == arch/arm64/configs/gki_defconfig`, so a
       # hand-edited entry that is merely *present* is not enough: it has to sit
       # where savedefconfig would put it (savedefconfig emits in Kconfig
-      # definition order). Catch that here instead of after a 10-minute Kleaf
-      # run. This step is best-effort: only a real defconfig drift is fatal, an
-      # environment problem just warns so it cannot mask the build itself.
-      - name: Check gki_defconfig is savedefconfig-stable
+      # definition order).
+      #
+      # A plain `make savedefconfig` cannot reproduce Kleaf's defconfig, because
+      # Kleaf layers its own fragments (Rust, CFI, KASAN, BTF, ...) on top. So
+      # this check does NOT diff the whole file: it only compares the relative
+      # order of the ZRAM symbols this patch set touches against the reference
+      # savedefconfig. Anything else drifting is Kleaf's business and is left to
+      # the real build, which enforces the exact rule anyway.
+      - name: Check ZRAM defconfig entries are savedefconfig-ordered
         shell: bash
         working-directory: ${{ env.ACK_ROOT }}/common
         run: |
@@ -132,24 +137,48 @@ jobs:
           if [ -n "$CLANG_BIN" ]; then
             export PATH="$(dirname "$CLANG_BIN"):$PATH"
           fi
-          if ! make -s ARCH=arm64 O="$OUT" gki_defconfig >"$BUILD_INFO/defcheck.log" 2>&1; then
-            echo '::warning::could not generate a reference defconfig here; skipping the drift check (Kleaf will still enforce it)'
+          if ! make -s ARCH=arm64 O="$OUT" gki_defconfig >"$BUILD_INFO/defcheck.log" 2>&1 \
+             || ! make -s ARCH=arm64 O="$OUT" savedefconfig >>"$BUILD_INFO/defcheck.log" 2>&1; then
+            echo '::warning::could not generate a reference defconfig here; skipping the order check'
             tail -20 "$BUILD_INFO/defcheck.log" || true
             exit 0
           fi
-          if ! make -s ARCH=arm64 O="$OUT" savedefconfig >>"$BUILD_INFO/defcheck.log" 2>&1; then
-            echo '::warning::savedefconfig failed here; skipping the drift check'
-            tail -20 "$BUILD_INFO/defcheck.log" || true
-            exit 0
-          fi
-          if diff -u arch/arm64/configs/gki_defconfig "$OUT/defconfig" \
-                 > "$BUILD_INFO/defconfig-drift.diff"; then
-            echo 'gki_defconfig is savedefconfig-stable'
-          else
-            echo '::error::gki_defconfig has drifted from savedefconfig; see the diff below'
-            cat "$BUILD_INFO/defconfig-drift.diff"
+
+          order_of() {
+            # Print this file's ZRAM symbols, one per line, in file order.
+            grep -E '^(# )?CONFIG_ZRAM' "$1" \
+              | sed -E 's/^# //; s/^(CONFIG_ZRAM[A-Z0-9_]*).*/\1/' \
+              | awk '!seen[$0]++'
+          }
+          order_of arch/arm64/configs/gki_defconfig > "$BUILD_INFO/zram-order-ours.txt"
+          order_of "$OUT/defconfig"               > "$BUILD_INFO/zram-order-ref.txt"
+          echo '--- ours ---'; cat "$BUILD_INFO/zram-order-ours.txt"
+          echo '--- reference savedefconfig ---'; cat "$BUILD_INFO/zram-order-ref.txt"
+
+          # Every ZRAM symbol we add must appear in the reference output, and the
+          # mutual order of the symbols present in both must be identical.
+          missing=$(comm -23 "$BUILD_INFO/zram-order-ours.txt" \
+                             "$BUILD_INFO/zram-order-ref.txt" | tr '\n' ' ')
+          if [ -n "$missing" ]; then
+            echo "::error::ZRAM symbols in gki_defconfig are not valid here: $missing"
             exit 1
           fi
+          # Verify the relative order explicitly against the reference file.
+          python3 - "$BUILD_INFO/zram-order-ours.txt" "$BUILD_INFO/zram-order-ref.txt" <<'PY'
+          import sys
+
+          ours = [l.strip() for l in open(sys.argv[1]) if l.strip()]
+          ref = [l.strip() for l in open(sys.argv[2]) if l.strip()]
+          refpos = {s: i for i, s in enumerate(ref)}
+          seq = [refpos[s] for s in ours if s in refpos]
+          if seq != sorted(seq):
+              print(f'::error::ZRAM entries are out of savedefconfig order: {ours}')
+              for s in ours:
+                  print(f'   {s} -> reference position {refpos.get(s, "absent")}')
+              sys.exit(1)
+          print(f'ZRAM entries follow savedefconfig order: {ours}')
+          PY
+
           for sym in CONFIG_ZRAM CONFIG_ZRAM_SDDC CONFIG_ZRAM_DEF_COMP_LZ4KDS \
                      CONFIG_ZRAM_DEF_COMP CONFIG_ZRAM_BACKEND_LZ4 \
                      CONFIG_ZRAM_WRITEBACK CONFIG_ZRAM_MULTI_COMP; do
