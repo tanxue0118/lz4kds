@@ -232,11 +232,16 @@ jobs:
           grep -E '^vermagic:' "$BUILD_INFO/ko-modinfo.txt" || true
           strings "$ko" | grep -Fx 'lz4kds' > /dev/null
           nm --defined-only "$ko" > "$BUILD_INFO/ko-symbols.txt"
+          awk '{print $NF}' "$BUILD_INFO/ko-symbols.txt" \
+            > "$BUILD_INFO/ko-symbol-names.txt"
           for symbol in zram_sddc_create zram_sddc_read_page \
               zcomp_supports_delta zcomp_compress_delta \
               crystal_lz4kd_encode crystal_lz4kd_decode \
               crystal_lz4kd_encode_delta crystal_lz4kd_decode_delta; do
-            if awk '{print $NF}' "$BUILD_INFO/ko-symbols.txt" | grep -Fxq "$symbol"; then
+            # Do not use grep -q in a pipe under pipefail: grep exits early
+            # on a match, awk receives SIGPIPE, and the whole pipeline looks
+            # failed even though the symbol is present.
+            if grep -Fx "$symbol" "$BUILD_INFO/ko-symbol-names.txt" > /dev/null; then
               printf 'present  %s\n' "$symbol"
             else
               echo "::error::missing symbol in zram.ko: $symbol"
