@@ -1662,7 +1662,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a79164169bb50
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc.c
-@@ -0,0 +1,3102 @@
+@@ -0,0 +1,3100 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include <linux/atomic.h>
