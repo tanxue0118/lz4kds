@@ -1952,10 +1952,8 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	bool released = false;
 +
 +	xa_lock_irqsave(xa, flags);
-+	if (xas_load(&xas) == XA_ZERO_ENTRY) {
-+		xas_store(&xas, NULL);
-+		released = !xas_error(&xas);
-+	}
++	if (xas_load(&xas) == XA_ZERO_ENTRY)
++		released = (__xa_erase(xa, index) == XA_ZERO_ENTRY);
 +	xa_unlock_irqrestore(xa, flags);
 +
 +	return released;
@@ -1975,11 +1973,9 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +		return NULL;
 +
 +	xa_lock_irqsave(xa, flags);
-+	if (xas_load(&xas) == expected) {
-+		xas_store(&xas, NULL);
-+		if (!xas_error(&xas))
-+			removed = expected;
-+	}
++	if (xas_load(&xas) == expected &&
++	    __xa_erase(xa, index) == expected)
++		removed = expected;
 +	xa_unlock_irqrestore(xa, flags);
 +
 +	return removed;
@@ -2070,12 +2066,13 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	if (WARN_ON_ONCE(!state))
 +		return false;
 +
-+	/* Consume only our reservation; never overwrite a concurrent node. */
++	/* Consume only our reservation; never overwrite a concurrent node.
++	 * __xa_insert() fails with -EBUSY if another owner won the race, so the
++	 * check-then-store stays single-shot under the array lock. */
 +	xa_lock_irqsave(&sddc->slot_states, flags);
-+	if (xas_load(&xas) == XA_ZERO_ENTRY) {
-+		xas_store(&xas, state);
-+		installed = !xas_error(&xas);
-+	}
++	if (xas_load(&xas) == XA_ZERO_ENTRY)
++		installed = !__xa_insert(&sddc->slot_states, index, state,
++					 GFP_ATOMIC);
 +	xa_unlock_irqrestore(&sddc->slot_states, flags);
 +
 +	return installed;
@@ -2262,15 +2259,16 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +static bool zram_sddc_ref_publish(struct zram_sddc *sddc,
 +		struct zram_sddc_ref *ref)
 +{
-+	XA_STATE(xas, &sddc->refs, 0);
 +	unsigned long flags;
 +	bool published = false;
 +
-+	xas_set(&xas, ref->cookie.id);
 +	xa_lock_irqsave(&sddc->refs, flags);
-+	if (xas_load(&xas) == XA_ZERO_ENTRY) {
-+		xas_store(&xas, ref);
-+		published = !xas_error(&xas);
++	if (xa_load(&sddc->refs, ref->cookie.id) == NULL) {
++		/* A NULL load hides XA_ZERO_ENTRY only when the slot is empty or
++		 * reserved; __xa_insert() is the primitive that consumes a
++		 * reservation atomically, and -EBUSY means someone else won. */
++		published = !__xa_insert(&sddc->refs, ref->cookie.id, ref,
++					 GFP_ATOMIC);
 +	}
 +	xa_unlock_irqrestore(&sddc->refs, flags);
 +	return published;
