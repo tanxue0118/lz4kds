@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
-index a0a29cfceb139030d4b1589b8dae67e50c0bd240..13af56f3fc57ae659f8c23f34039ebadb004e93d 100644
+index a0a29cf..13af56f 100644
 --- a/arch/arm64/configs/gki_defconfig
 +++ b/arch/arm64/configs/gki_defconfig
 @@ -329,6 +329,8 @@ CONFIG_ARM_SCPI_PROTOCOL=y
@@ -12,7 +12,7 @@ index a0a29cfceb139030d4b1589b8dae67e50c0bd240..13af56f3fc57ae659f8c23f34039ebad
  CONFIG_ZRAM_MULTI_COMP=y
  CONFIG_BLK_DEV_LOOP=y
 diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
-index af201392ed52cfd5590474f778c27a155ca5394a..701f28cab3eb7e8ff6b5f0f33ad775832e3999bb 100644
+index af20139..701f28c 100644
 --- a/drivers/block/zram/Kconfig
 +++ b/drivers/block/zram/Kconfig
 @@ -15,6 +15,21 @@ config ZRAM
@@ -57,7 +57,7 @@ index af201392ed52cfd5590474f778c27a155ca5394a..701f28cab3eb7e8ff6b5f0f33ad77583
  	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
  	default "842" if ZRAM_DEF_COMP_842
 diff --git a/drivers/block/zram/Makefile b/drivers/block/zram/Makefile
-index de9e457907b1e9834937df323413bd11d18f5d5c..c6a220ddd6c1e2715f4e222ca6739dd583a23ab5 100644
+index de9e457..c6a220d 100644
 --- a/drivers/block/zram/Makefile
 +++ b/drivers/block/zram/Makefile
 @@ -1,4 +1,16 @@
@@ -81,7 +81,7 @@ index de9e457907b1e9834937df323413bd11d18f5d5c..c6a220ddd6c1e2715f4e222ca6739dd5
 +zram-$(CONFIG_ZRAM_SDDC_KUNIT_TEST) += sddc/zram_sddc_codec_test.o
 diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd.h b/drivers/block/zram/sddc/lz4kd/lz4kd.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a6eb9e23a2135aa132b958ba65e6676f2644289e
+index 0000000..a6eb9e2
 --- /dev/null
 +++ b/drivers/block/zram/sddc/lz4kd/lz4kd.h
 @@ -0,0 +1,250 @@
@@ -337,7 +337,7 @@ index 0000000000000000000000000000000000000000..a6eb9e23a2135aa132b958ba65e6676f
 +#endif /* _LZ4KD_H */
 diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_decode.c b/drivers/block/zram/sddc/lz4kd/lz4kd_decode.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b5696e1bdf654fca1746900b54d34bc999442d0
+index 0000000..0b5696e
 --- /dev/null
 +++ b/drivers/block/zram/sddc/lz4kd/lz4kd_decode.c
 @@ -0,0 +1,264 @@
@@ -607,7 +607,7 @@ index 0000000000000000000000000000000000000000..0b5696e1bdf654fca1746900b54d34bc
 +}
 diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_encode.c b/drivers/block/zram/sddc/lz4kd/lz4kd_encode.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..28799400fabbe9a8a5baad4aeacb15edcdb941ae
+index 0000000..2879940
 --- /dev/null
 +++ b/drivers/block/zram/sddc/lz4kd/lz4kd_encode.c
 @@ -0,0 +1,435 @@
@@ -1048,7 +1048,7 @@ index 0000000000000000000000000000000000000000..28799400fabbe9a8a5baad4aeacb15ed
 +}
 diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_encode_delta.c b/drivers/block/zram/sddc/lz4kd/lz4kd_encode_delta.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..febff71b44d1ffe9abcd4d19a4912ab244ff1f5a
+index 0000000..febff71
 --- /dev/null
 +++ b/drivers/block/zram/sddc/lz4kd/lz4kd_encode_delta.c
 @@ -0,0 +1,223 @@
@@ -1277,7 +1277,7 @@ index 0000000000000000000000000000000000000000..febff71b44d1ffe9abcd4d19a4912ab2
 +}
 diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_encode_private.h b/drivers/block/zram/sddc/lz4kd/lz4kd_encode_private.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0f3af025af2f2f1f2e814af645496240529c857e
+index 0000000..0f3af02
 --- /dev/null
 +++ b/drivers/block/zram/sddc/lz4kd/lz4kd_encode_private.h
 @@ -0,0 +1,110 @@
@@ -1393,7 +1393,7 @@ index 0000000000000000000000000000000000000000..0f3af025af2f2f1f2e814af645496240
 +#endif /* _LZ4KD_ENCODE_PRIVATE_H */
 diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_neon.c b/drivers/block/zram/sddc/lz4kd/lz4kd_neon.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..43f56e9a2fd6ca9033a9906a8d3c2d465b9182df
+index 0000000..43f56e9
 --- /dev/null
 +++ b/drivers/block/zram/sddc/lz4kd/lz4kd_neon.c
 @@ -0,0 +1,49 @@
@@ -1448,7 +1448,7 @@ index 0000000000000000000000000000000000000000..43f56e9a2fd6ca9033a9906a8d3c2d46
 +}
 diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_neon.h b/drivers/block/zram/sddc/lz4kd/lz4kd_neon.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..760ac5ca8a13c885bd42c5610b3db900cfc90472
+index 0000000..760ac5c
 --- /dev/null
 +++ b/drivers/block/zram/sddc/lz4kd/lz4kd_neon.h
 @@ -0,0 +1,11 @@
@@ -1465,7 +1465,7 @@ index 0000000000000000000000000000000000000000..760ac5ca8a13c885bd42c5610b3db900
 +#endif /* _LZ4KD_NEON_H */
 diff --git a/drivers/block/zram/sddc/lz4kd/lz4kd_private.h b/drivers/block/zram/sddc/lz4kd/lz4kd_private.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4c47269a3ebeab5205f96d1f5be490fb5c0eabd5
+index 0000000..4c47269
 --- /dev/null
 +++ b/drivers/block/zram/sddc/lz4kd/lz4kd_private.h
 @@ -0,0 +1,188 @@
@@ -1659,10 +1659,10 @@ index 0000000000000000000000000000000000000000..4c47269a3ebeab5205f96d1f5be490fb
 +#endif /* _LZ4KD_PRIVATE_H */
 diff --git a/drivers/block/zram/sddc/zram_sddc.c b/drivers/block/zram/sddc/zram_sddc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a79164169bb50
+index 0000000..343c537
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc.c
-@@ -0,0 +1,3101 @@
+@@ -0,0 +1,3240 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include <linux/atomic.h>
@@ -1672,6 +1672,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +#include <linux/highmem.h>
 +#include <linux/idr.h>
 +#include <linux/jhash.h>
++#include <linux/kernel.h>
 +#include <linux/mm.h>
 +#include <linux/refcount.h>
 +#include <linux/slab.h>
@@ -1807,9 +1808,19 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	u8 prio;
 +};
 +
++/* Mutation counters are tiny per-slot generation stamps.  They used to be a
++ * flat u64 array sized by nr_slots, which cost 44 MiB at the 22 GiB zram0 that
++ * Xiaomi ships and made SDDC silently fall back whenever a 46 MiB vmalloc
++ * could not be found.  Store u32 stamps in lazily allocated chunks instead so
++ * the cost tracks slots that were actually observed, not the advertised disk
++ * size. */
++#define ZRAM_SDDC_MUTATION_CHUNK_BITS	10U
++#define ZRAM_SDDC_MUTATION_CHUNK	(1U << ZRAM_SDDC_MUTATION_CHUNK_BITS)
++#define ZRAM_SDDC_MUTATION_CHUNKS(nr)		(DIV_ROUND_UP((nr), ZRAM_SDDC_MUTATION_CHUNK))
++
 +struct zram_sddc {
 +	struct zram *zram;
-+	u64 *mutation_seq;
++	u32 **mutation_seq;
 +	struct xarray slot_states;
 +	struct zram_sddc_bucket *exact_index;
 +	struct zram_sddc_bucket *sample_index;
@@ -2003,8 +2014,73 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	return state;
 +}
 +
++static inline u32 *zram_sddc_mutation_chunk(struct zram_sddc *sddc, u32 index)
++{
++	u32 chunk = index >> ZRAM_SDDC_MUTATION_CHUNK_BITS;
++
++	if (!sddc->mutation_seq || chunk >= ZRAM_SDDC_MUTATION_CHUNKS(sddc->nr_slots))
++		return NULL;
++	return sddc->mutation_seq[chunk];
++}
++
++/* Read the stamp.  A chunk that was never observed reads as 0, which is the
++ * same value a freshly reserved slot has, so callers keep working unchanged. */
++static u32 zram_sddc_mutation_get(struct zram_sddc *sddc, u32 index)
++{
++	u32 *chunk = zram_sddc_mutation_chunk(sddc, index);
++
++	if (!chunk)
++		return 0;
++	return chunk[index & (ZRAM_SDDC_MUTATION_CHUNK - 1)];
++}
++
++/* Free every lazily allocated chunk plus the pointer array itself. */
++static void zram_sddc_mutation_free(struct zram_sddc *sddc)
++{
++	u32 n, i;
++
++	if (!sddc->mutation_seq)
++		return;
++	n = (u32)ZRAM_SDDC_MUTATION_CHUNKS(sddc->nr_slots);
++	for (i = 0; i < n; i++)
++		kfree(sddc->mutation_seq[i]);
++	vfree(sddc->mutation_seq);
++	sddc->mutation_seq = NULL;
++}
++
++/* Allocate the chunk that owns @index.  Returns NULL when the index is out of
++ * range or the tiny (4 KiB) chunk allocation fails; callers treat that as "the
++ * stamp cannot advance", which is the same graceful degradation SDDC already
++ * applies when a reservation cannot be taken. */
++static u32 *zram_sddc_mutation_chunk_ensure(struct zram_sddc *sddc, u32 index)
++{
++	u32 chunk = index >> ZRAM_SDDC_MUTATION_CHUNK_BITS;
++	u32 *p, *old;
++
++	if (!sddc->mutation_seq ||
++	    chunk >= ZRAM_SDDC_MUTATION_CHUNKS(sddc->nr_slots))
++		return NULL;
++
++	p = sddc->mutation_seq[chunk];
++	if (p)
++		return p;
++
++	p = kzalloc(sizeof(u32) * ZRAM_SDDC_MUTATION_CHUNK, GFP_ATOMIC);
++	if (!p)
++		return NULL;
++	/* A racing observer may have installed its own chunk first; keep theirs
++	 * and drop ours.  cmpxchg() on a pointer slot returns the previous value,
++	 * so a non-NULL old means we lost the race. */
++	old = cmpxchg(&sddc->mutation_seq[chunk], NULL, p);
++	if (old) {
++		kfree(p);
++		return old;
++	}
++	return p;
++}
++
 +static bool zram_sddc_state_identity_changed(
-+		struct zram_sddc *sddc, u32 index, u64 mutation_seq)
++		struct zram_sddc *sddc, u32 index, u32 mutation_seq)
 +{
 +	struct zram *zram = sddc->zram;
 +	bool changed;
@@ -2013,13 +2089,13 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +		return false;
 +
 +	zram_sddc_slot_lock(zram, index);
-+	changed = sddc->mutation_seq[index] != mutation_seq;
++	changed = zram_sddc_mutation_get(sddc, index) != mutation_seq;
 +	zram_sddc_slot_unlock(zram, index);
 +	return changed;
 +}
 +
 +static void zram_sddc_state_abort(struct zram_sddc *sddc, u32 index,
-+		u64 mutation_seq, struct zram_sddc_slot_state *state)
++		u32 mutation_seq, struct zram_sddc_slot_state *state)
 +{
 +	void *entry;
 +
@@ -2081,8 +2157,14 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +static void zram_sddc_mutation_advance_locked(struct zram_sddc *sddc,
 +		u32 index)
 +{
-+	if (!++sddc->mutation_seq[index])
-+		sddc->mutation_seq[index]++;
++	u32 *chunk = zram_sddc_mutation_chunk_ensure(sddc, index);
++	u32 *stamp;
++
++	if (!chunk)
++		return;
++	stamp = &chunk[index & (ZRAM_SDDC_MUTATION_CHUNK - 1)];
++	if (!++*stamp)
++		(*stamp)++;
 +}
 +
 +static struct zram_sddc *zram_sddc_manager_get(struct zram *zram)
@@ -2366,7 +2448,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +
 +	if (key->index >= sddc->nr_slots)
 +		return false;
-+	if (sddc->mutation_seq[key->index] != key->mutation_seq)
++	if (zram_sddc_mutation_get(sddc, key->index) != key->mutation_seq)
 +		return false;
 +	state_entry = zram_sddc_state_load_raw(sddc, key->index);
 +	/* A conversion reserves its target before taking this lock.  That
@@ -2769,7 +2851,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +		goto unlock;
 +
 +	source->key.index = candidate->index;
-+	source->key.mutation_seq = sddc->mutation_seq[candidate->index];
++	source->key.mutation_seq = zram_sddc_mutation_get(sddc, candidate->index);
 +	if (state && state->kind == ZRAM_SDDC_REF) {
 +		source->cookie = state->ref;
 +		source->ref = zram_sddc_ref_pin(sddc, &state->ref);
@@ -2832,7 +2914,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +		return NULL;
 +
 +	zram_sddc_slot_lock(zram, source->key.index);
-+	if (sddc->mutation_seq[source->key.index] !=
++	if (zram_sddc_mutation_get(sddc, source->key.index) !=
 +			source->key.mutation_seq ||
 +		zram_sddc_state_load_raw(sddc, source->key.index) !=
 +				XA_ZERO_ENTRY ||
@@ -3436,21 +3518,37 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +			zram_sddc_observe_workfn);
 +	}
 +
-+	sddc->mutation_seq = vzalloc(array_size(nr_pages,
-+						sizeof(*sddc->mutation_seq)));
-+	sddc->observe_pending = bitmap_zalloc((unsigned int)nr_pages,
-+						 GFP_KERNEL | __GFP_NOWARN);
++	/* Only the chunk *pointer* array is allocated up front: four bytes per
++	 * 1024 slots, i.e. 22.6 KiB at 22 GiB.  The chunks themselves are
++	 * allocated on first observation, so metadata no longer scales with the
++	 * advertised disk size. */
++	sddc->mutation_seq = vzalloc(array_size(
++			ZRAM_SDDC_MUTATION_CHUNKS(nr_pages),
++			sizeof(*sddc->mutation_seq)));
++	if (!sddc->mutation_seq)
++		goto fail_mutation_seq;
++
++	/* A bitmap over slots is bit-per-slot and cannot be chunked as cheaply as
++	 * the stamps, but vmalloc avoids the order-8 (1 MiB) contiguous kmalloc
++	 * that bitmap_zalloc would need at 22 GiB. */
++	sddc->observe_pending = vzalloc(BITS_TO_LONGS((unsigned long)nr_pages) *
++					sizeof(unsigned long));
++	if (!sddc->observe_pending)
++		goto fail_observe_pending;
++
 +	sddc->exact_index = vzalloc(array_size(ZRAM_SDDC_HASH_BUCKETS,
 +					       sizeof(*sddc->exact_index)));
++	if (!sddc->exact_index)
++		goto fail_exact_index;
++
 +	sddc->sample_index = vzalloc(array_size(ZRAM_SDDC_HASH_BUCKETS,
 +							sizeof(*sddc->sample_index)));
-+	if (!sddc->mutation_seq || !sddc->observe_pending ||
-+	    !sddc->exact_index || !sddc->sample_index)
-+		goto fail;
++	if (!sddc->sample_index)
++		goto fail_sample_index;
 +
 +	sddc->observe_workspace = zram_sddc_workspace_alloc(GFP_KERNEL);
 +	if (!sddc->observe_workspace)
-+		goto fail;
++		goto fail_workspace;
 +
 +	/* Huawei runs SDDC recompression from a reclaim-capable worker.  Keep the
 +	 * ordered/budgeted hand-off, but do not let freezer state postpone the
@@ -3459,12 +3557,12 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	sddc->workqueue = alloc_ordered_workqueue("%s-sddc",
 +				WQ_MEM_RECLAIM | WQ_HIGHPRI, zram->disk->disk_name);
 +	if (!sddc->workqueue)
-+		goto fail;
++		goto fail_workqueue;
 +	sddc->free_workqueue = alloc_workqueue("%s-sddc-free",
 +			WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_HIGHPRI, 0,
 +			zram->disk->disk_name);
 +	if (!sddc->free_workqueue)
-+		goto fail;
++		goto fail_free_workqueue;
 +
 +	spin_lock(&zram->sddc_lock);
 +	WARN_ON_ONCE(zram->sddc);
@@ -3472,23 +3570,59 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	spin_unlock(&zram->sddc_lock);
 +	return 0;
 +
-+fail:
-+	pr_warn("%s: SDDC metadata allocation failed; using ordinary compression\n",
-+		zram->disk->disk_name);
++fail_free_workqueue:
++	pr_err("%s: SDDC disabled: free workqueue allocation failed; "
++	       "falling back to ordinary LZ4KD\n", zram->disk->disk_name);
++	goto fail_common;
++
++fail_workqueue:
++	pr_err("%s: SDDC disabled: workqueue allocation failed; "
++	       "falling back to ordinary LZ4KD\n", zram->disk->disk_name);
++	goto fail_common;
++
++fail_workspace:
++	pr_err("%s: SDDC disabled: observer workspace allocation failed; "
++	       "falling back to ordinary LZ4KD\n", zram->disk->disk_name);
++	goto fail_common;
++
++fail_sample_index:
++	pr_err("%s: SDDC disabled: sample index allocation failed; "
++	       "falling back to ordinary LZ4KD\n", zram->disk->disk_name);
++	goto fail_common;
++
++fail_exact_index:
++	pr_err("%s: SDDC disabled: exact index allocation failed; "
++	       "falling back to ordinary LZ4KD\n", zram->disk->disk_name);
++	goto fail_common;
++
++fail_observe_pending:
++	pr_err("%s: SDDC disabled: observe-pending bitmap allocation failed "
++	       "(%lu slots); falling back to ordinary LZ4KD\n",
++	       zram->disk->disk_name, nr_pages);
++	goto fail_common;
++
++fail_mutation_seq:
++	pr_err("%s: SDDC disabled: mutation chunk table allocation failed "
++	       "(%lu slots); falling back to ordinary LZ4KD\n",
++	       zram->disk->disk_name, nr_pages);
++	goto fail_common;
++
++fail_common:
 +	if (sddc->free_workqueue)
 +		destroy_workqueue(sddc->free_workqueue);
 +	if (sddc->workqueue)
 +		destroy_workqueue(sddc->workqueue);
 +	zram_sddc_workspace_free(sddc->observe_workspace);
-+	bitmap_free(sddc->observe_pending);
++	vfree(sddc->observe_pending);
 +	vfree(sddc->sample_index);
 +	vfree(sddc->exact_index);
-+	vfree(sddc->mutation_seq);
++	zram_sddc_mutation_free(sddc);
 +	xa_destroy(&sddc->slot_states);
 +	xa_destroy(&sddc->refs);
 +	ida_destroy(&sddc->ref_ids);
 +	kfree(sddc);
-+	/* SDDC is opportunistic; retain ordinary LZ4KD zram on allocation loss. */
++	/* SDDC is opportunistic; retain ordinary LZ4KD zram on allocation loss.
++	 * The reason is now printed above so the fallback is never silent. */
 +	return 0;
 +}
 +
@@ -3568,11 +3702,11 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	destroy_workqueue(sddc->workqueue);
 +	destroy_workqueue(sddc->free_workqueue);
 +	zram_sddc_destroy_metadata(sddc);
-+	bitmap_free(sddc->observe_pending);
++	vfree(sddc->observe_pending);
 +	zram_sddc_workspace_free(sddc->observe_workspace);
 +	vfree(sddc->sample_index);
 +	vfree(sddc->exact_index);
-+	vfree(sddc->mutation_seq);
++	zram_sddc_mutation_free(sddc);
 +	xa_destroy(&sddc->slot_states);
 +	xa_destroy(&sddc->refs);
 +	ida_destroy(&sddc->ref_ids);
@@ -3677,7 +3811,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +		return;
 +
 +	key->index = index;
-+	key->mutation_seq = sddc->mutation_seq[index];
++	key->mutation_seq = zram_sddc_mutation_get(sddc, index);
 +	key->handle = handle;
 +	key->size = size;
 +	key->prio = prio;
@@ -3741,7 +3875,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	memset(snapshot, 0, sizeof(*snapshot));
 +	if (!sddc || index >= sddc->nr_slots)
 +		return;
-+	snapshot->mutation_seq = sddc->mutation_seq[index];
++	snapshot->mutation_seq = zram_sddc_mutation_get(sddc, index);
 +	state = zram_sddc_state_load_locked(sddc, index);
 +	if (!state)
 +		return;
@@ -3863,7 +3997,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +		return -EAGAIN;
 +	state = zram_sddc_state_load_locked(sddc, index);
 +	if (expected &&
-+	    (sddc->mutation_seq[index] != expected->mutation_seq ||
++	    (zram_sddc_mutation_get(sddc, index) != expected->mutation_seq ||
 +	     !state || state->kind != expected->kind ||
 +	     !zram_sddc_cookie_equal(&state->ref, &expected->ref)))
 +		return -EAGAIN;
@@ -4106,7 +4240,11 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +struct zram_sddc_test_ctx {
 +	struct zram zram;
 +	struct zram_sddc sddc;
-+	u64 mutation_seq[ZRAM_SDDC_TEST_SLOTS];
++	/* ZRAM_SDDC_TEST_SLOTS (2) fits in a single mutation chunk, so the test
++	 * supplies one static chunk and a one-entry pointer array.  This mirrors
++	 * the production layout without touching the chunk allocator. */
++	u32 mutation_stamps[ZRAM_SDDC_MUTATION_CHUNK];
++	u32 *mutation_seq[1];
 +	struct zram_table_entry table[ZRAM_SDDC_TEST_SLOTS];
 +	struct zcomp comp;
 +};
@@ -4146,6 +4284,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	spin_lock_init(&ctx->zram.sddc_lock);
 +
 +	ctx->sddc.zram = &ctx->zram;
++	ctx->mutation_seq[0] = ctx->mutation_stamps;
 +	ctx->sddc.mutation_seq = ctx->mutation_seq;
 +	ctx->sddc.nr_slots = ZRAM_SDDC_TEST_SLOTS;
 +	spin_lock_init(&ctx->sddc.state_lock);
@@ -4429,7 +4568,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	struct zram_sddc_slot_state *state;
 +	struct zram_sddc_snapshot snapshot;
 +
-+	ctx->mutation_seq[0] = 41;
++	ctx->mutation_stamps[0] = 41;
 +	state = zram_sddc_test_install_state(ctx, 0,
 +			ZRAM_SDDC_DELTA);
 +	KUNIT_ASSERT_NOT_NULL(test, state);
@@ -4441,10 +4580,10 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	KUNIT_ASSERT_TRUE(test,
 +			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
 +
-+	ctx->mutation_seq[0]++;
++	ctx->mutation_stamps[0]++;
 +	KUNIT_EXPECT_FALSE(test,
 +			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
-+	ctx->mutation_seq[0] = snapshot.mutation_seq;
++	ctx->mutation_stamps[0] = snapshot.mutation_seq;
 +	state->kind = ZRAM_SDDC_ALIAS;
 +	KUNIT_EXPECT_FALSE(test,
 +			zram_sddc_test_snapshot_matches(ctx, 0, &snapshot));
@@ -4477,7 +4616,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_ASSERT_TRUE(test,
 +			zram_sddc_ref_publish(&ctx->sddc, &ref));
-+	ctx->mutation_seq[0] = 12;
++	ctx->mutation_stamps[0] = 12;
 +	state = zram_sddc_test_install_state(ctx, 0,
 +			ZRAM_SDDC_DELTA);
 +	KUNIT_ASSERT_NOT_NULL(test, state);
@@ -4523,14 +4662,14 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +		.prio = ZRAM_PRIMARY_COMP,
 +	};
 +
-+	ctx->mutation_seq[0] = key.mutation_seq;
++	ctx->mutation_stamps[0] = key.mutation_seq;
 +	ctx->table[0].handle = key.handle;
 +	zram_sddc_set_obj_size(&ctx->zram, 0, key.size);
 +	KUNIT_ASSERT_TRUE(test, zram_sddc_test_job_matches(ctx, &key));
 +
-+	ctx->mutation_seq[0]++;
++	ctx->mutation_stamps[0]++;
 +	KUNIT_EXPECT_FALSE(test, zram_sddc_test_job_matches(ctx, &key));
-+	ctx->mutation_seq[0] = key.mutation_seq;
++	ctx->mutation_stamps[0] = key.mutation_seq;
 +	ctx->table[0].handle++;
 +	KUNIT_EXPECT_FALSE(test, zram_sddc_test_job_matches(ctx, &key));
 +	ctx->table[0].handle = key.handle;
@@ -4546,12 +4685,12 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	struct zram_sddc_snapshot snapshot;
 +	u64 reservation_seq = 73;
 +
-+	ctx->mutation_seq[0] = reservation_seq;
++	ctx->mutation_stamps[0] = reservation_seq;
 +	KUNIT_ASSERT_TRUE(test, xa_empty(&ctx->sddc.slot_states));
 +	zram_sddc_slot_lock(&ctx->zram, 0);
 +	zram_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
 +	zram_sddc_slot_unlock(&ctx->zram, 0);
-+	KUNIT_EXPECT_EQ(test, snapshot.mutation_seq, (u64)73);
++	KUNIT_EXPECT_EQ(test, snapshot.mutation_seq, (u32)73);
 +	KUNIT_EXPECT_EQ(test, snapshot.kind, (u8)ZRAM_SDDC_NONE);
 +
 +	state = zram_sddc_state_prepare(&ctx->sddc, 0);
@@ -4584,7 +4723,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +		.prio = ZRAM_PRIMARY_COMP,
 +	};
 +
-+	ctx->mutation_seq[0] = key.mutation_seq;
++	ctx->mutation_stamps[0] = key.mutation_seq;
 +	ctx->table[0].handle = key.handle;
 +	zram_sddc_set_obj_size(&ctx->zram, 0, key.size);
 +	state = zram_sddc_state_prepare(&ctx->sddc, key.index);
@@ -4606,11 +4745,11 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +{
 +	struct zram_sddc_test_ctx *ctx = test->priv;
 +
-+	ctx->mutation_seq[0] = U64_MAX;
++	ctx->mutation_stamps[0] = U32_MAX;
 +	zram_sddc_mutation_advance_locked(&ctx->sddc, 0);
-+	KUNIT_EXPECT_EQ(test, ctx->mutation_seq[0], (u64)1);
++	KUNIT_EXPECT_EQ(test, ctx->mutation_stamps[0], (u32)1);
 +	zram_sddc_mutation_advance_locked(&ctx->sddc, 0);
-+	KUNIT_EXPECT_EQ(test, ctx->mutation_seq[0], (u64)2);
++	KUNIT_EXPECT_EQ(test, ctx->mutation_stamps[0], (u32)2);
 +}
 +
 +static void zram_sddc_flatten_snapshot_test(struct kunit *test)
@@ -4622,7 +4761,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	size_t size = 123;
 +	int ret;
 +
-+	ctx->mutation_seq[0] = 27;
++	ctx->mutation_stamps[0] = 27;
 +	state = zram_sddc_test_install_state(ctx, 0,
 +			ZRAM_SDDC_ALIAS);
 +	KUNIT_ASSERT_NOT_NULL(test, state);
@@ -4631,7 +4770,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +	zram_sddc_slot_lock(&ctx->zram, 0);
 +	zram_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
 +	zram_sddc_slot_unlock(&ctx->zram, 0);
-+	ctx->mutation_seq[0]++;
++	ctx->mutation_stamps[0]++;
 +	dst = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
 +	KUNIT_ASSERT_NOT_NULL(test, dst);
 +
@@ -4766,7 +4905,7 @@ index 0000000000000000000000000000000000000000..27ef0debab498ee1004d4537e01a7916
 +#endif /* CONFIG_ZRAM_SDDC_KUNIT_TEST */
 diff --git a/drivers/block/zram/sddc/zram_sddc.h b/drivers/block/zram/sddc/zram_sddc.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..26b63ec3c27ba87edb58ad1c5d649ec047ae4757
+index 0000000..8aed2db
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc.h
 @@ -0,0 +1,173 @@
@@ -4796,13 +4935,13 @@ index 0000000000000000000000000000000000000000..26b63ec3c27ba87edb58ad1c5d649ec0
 +};
 +
 +struct zram_sddc_snapshot {
-+	u64 mutation_seq;
++	u32 mutation_seq;	/* matches the per-slot u32 mutation stamp */
 +	struct zram_sddc_cookie ref;
 +	u8 kind;
 +};
 +
 +struct zram_sddc_job_key {
-+	u64 mutation_seq;
++	u32 mutation_seq;	/* matches the per-slot u32 mutation stamp */
 +	unsigned long handle;
 +	u32 index;
 +	u32 size;
@@ -4945,7 +5084,7 @@ index 0000000000000000000000000000000000000000..26b63ec3c27ba87edb58ad1c5d649ec0
 +#endif /* _ZRAM_SDDC_H_ */
 diff --git a/drivers/block/zram/sddc/zram_sddc_codec.c b/drivers/block/zram/sddc/zram_sddc_codec.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..754b4a0d703cac18c2f515c9956036ea2633d29b
+index 0000000..754b4a0
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc_codec.c
 @@ -0,0 +1,175 @@
@@ -5126,7 +5265,7 @@ index 0000000000000000000000000000000000000000..754b4a0d703cac18c2f515c9956036ea
 +}
 diff --git a/drivers/block/zram/sddc/zram_sddc_codec.h b/drivers/block/zram/sddc/zram_sddc_codec.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb204f149e55b3cf488bf222478171db54fdaacc
+index 0000000..fb204f1
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc_codec.h
 @@ -0,0 +1,38 @@
@@ -5170,7 +5309,7 @@ index 0000000000000000000000000000000000000000..fb204f149e55b3cf488bf222478171db
 +#endif /* _ZRAM_SDDC_CODEC_H_ */
 diff --git a/drivers/block/zram/sddc/zram_sddc_codec_test.c b/drivers/block/zram/sddc/zram_sddc_codec_test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6b70532fdcb6ceb31918b24312d257e50cff879
+index 0000000..c6b7053
 --- /dev/null
 +++ b/drivers/block/zram/sddc/zram_sddc_codec_test.c
 @@ -0,0 +1,282 @@
@@ -5457,7 +5596,7 @@ index 0000000000000000000000000000000000000000..c6b70532fdcb6ceb31918b24312d257e
 +
 +kunit_test_suite(zram_sddc_codec_test_suite);
 diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
-index 8237b08c49d8617d338193e5d4a1900f81182f53..2f29ae1e2647b1d580ddb6f25bcf861525384895 100644
+index 8237b08..2f29ae1 100644
 --- a/drivers/block/zram/zcomp.c
 +++ b/drivers/block/zram/zcomp.c
 @@ -14,6 +14,9 @@
@@ -5761,7 +5900,7 @@ index 8237b08c49d8617d338193e5d4a1900f81182f53..2f29ae1e2647b1d580ddb6f25bcf8615
  	if (error) {
  		kfree(comp);
 diff --git a/drivers/block/zram/zcomp.h b/drivers/block/zram/zcomp.h
-index cdefdef93da8c00d3086e10c0980f7c5462694e8..06813fe6985bb03bda4bbad5840d9cb6f592749c 100644
+index cdefdef..06813fe 100644
 --- a/drivers/block/zram/zcomp.h
 +++ b/drivers/block/zram/zcomp.h
 @@ -7,18 +7,47 @@
@@ -5835,7 +5974,7 @@ index cdefdef93da8c00d3086e10c0980f7c5462694e8..06813fe6985bb03bda4bbad5840d9cb6
  bool zcomp_set_max_streams(struct zcomp *comp, int num_strm);
  #endif /* _ZCOMP_H_ */
 diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
-index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b094ba2692 100644
+index 9f8bf07..91f8b34 100644
 --- a/drivers/block/zram/zram_drv.c
 +++ b/drivers/block/zram/zram_drv.c
 @@ -139,7 +139,8 @@ static inline bool zram_allocated(struct zram *zram, u32 index)
@@ -5858,7 +5997,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  			goto next;
  
  		if (mode & IDLE_WRITEBACK &&
-@@ -1232,6 +1234,34 @@ static DEVICE_ATTR_RO(mm_stat);
+@@ -1232,6 +1234,36 @@ static DEVICE_ATTR_RO(mm_stat);
  static DEVICE_ATTR_RO(bd_stat);
  #endif
  static DEVICE_ATTR_RO(debug_stat);
@@ -5872,6 +6011,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
 +	zram_sddc_get_stats(zram, &stats);
 +	return sysfs_emit(buf,
 +		"enabled: %u\n"
++		"pending: %u\n"
 +		"queued: %llu\n"
 +		"observed: %llu\n"
 +		"refs: %llu\n"
@@ -5883,7 +6023,8 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
 +		"saved_bytes_total: %llu\n"
 +		"decode_failures: %llu\n"
 +		"flatten_failures: %llu\n",
-+		stats.enabled, stats.queued, stats.observed, stats.refs,
++		stats.enabled, stats.pending, stats.queued, stats.observed,
++		stats.refs,
 +		stats.aliases, stats.deltas, stats.alias_hits,
 +		stats.delta_hits, stats.saved_bytes, stats.saved_bytes_total,
 +		stats.decode_failures, stats.flatten_failures);
@@ -5893,7 +6034,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  
  static void zram_meta_free(struct zram *zram, u64 disksize)
  {
-@@ -1241,9 +1271,13 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
+@@ -1241,9 +1273,13 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
  	if (!zram->table)
  		return;
  
@@ -5909,7 +6050,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  
  	zs_destroy_pool(zram->mem_pool);
  	vfree(zram->table);
-@@ -1279,6 +1313,7 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
+@@ -1279,6 +1315,7 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
  static void zram_free_page(struct zram *zram, size_t index)
  {
  	unsigned long handle;
@@ -5917,7 +6058,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  
  #ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
  	zram->table[index].ac_time = 0;
-@@ -1296,6 +1331,9 @@ static void zram_free_page(struct zram *zram, size_t index)
+@@ -1296,6 +1333,9 @@ static void zram_free_page(struct zram *zram, size_t index)
  
  	zram_set_priority(zram, index, 0);
  
@@ -5927,7 +6068,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  	if (zram_test_flag(zram, index, ZRAM_WB)) {
  		zram_clear_flag(zram, index, ZRAM_WB);
  		free_block_bdev(zram, zram_get_element(zram, index));
-@@ -1313,8 +1351,10 @@ static void zram_free_page(struct zram *zram, size_t index)
+@@ -1313,8 +1353,10 @@ static void zram_free_page(struct zram *zram, size_t index)
  	}
  
  	handle = zram_get_handle(zram, index);
@@ -5939,7 +6080,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  
  	zs_free(zram->mem_pool, handle);
  
-@@ -1382,11 +1422,21 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
+@@ -1382,11 +1424,21 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
  {
  	int ret;
  
@@ -5964,7 +6105,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  	} else {
  		/*
  		 * The slot should be unlocked before reading from the backing
-@@ -1442,6 +1491,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
+@@ -1442,6 +1494,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
  	struct zcomp_strm *zstrm;
  	unsigned long element = 0;
  	enum zram_pageflags flags = 0;
@@ -5972,7 +6113,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  
  	mem = kmap_atomic(page);
  	if (page_same_filled(mem, &element)) {
-@@ -1551,10 +1601,11 @@ out:
+@@ -1551,10 +1604,11 @@ out:
  		zram_set_handle(zram, index, handle);
  		zram_set_obj_size(zram, index, comp_len);
  	}
@@ -5987,7 +6128,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  	return ret;
  }
  
-@@ -1839,7 +1890,8 @@ static ssize_t recompress_store(struct device *dev,
+@@ -1839,7 +1893,8 @@ static ssize_t recompress_store(struct device *dev,
  		if (zram_test_flag(zram, index, ZRAM_WB) ||
  		    zram_test_flag(zram, index, ZRAM_UNDER_WB) ||
  		    zram_test_flag(zram, index, ZRAM_SAME) ||
@@ -5997,7 +6138,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  			goto next;
  
  		err = zram_recompress(zram, index, page, threshold,
-@@ -2026,6 +2078,8 @@ static void zram_destroy_comps(struct zram *zram)
+@@ -2026,6 +2081,8 @@ static void zram_destroy_comps(struct zram *zram)
  
  static void zram_reset_device(struct zram *zram)
  {
@@ -6006,7 +6147,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  	down_write(&zram->init_lock);
  
  	zram->limit_pages = 0;
-@@ -2042,6 +2096,7 @@ static void zram_reset_device(struct zram *zram)
+@@ -2042,6 +2099,7 @@ static void zram_reset_device(struct zram *zram)
  
  	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
  	up_write(&zram->init_lock);
@@ -6014,7 +6155,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  }
  
  static ssize_t disksize_store(struct device *dev,
-@@ -2057,6 +2112,7 @@ static ssize_t disksize_store(struct device *dev,
+@@ -2057,6 +2115,7 @@ static ssize_t disksize_store(struct device *dev,
  	if (!disksize)
  		return -EINVAL;
  
@@ -6022,7 +6163,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  	down_write(&zram->init_lock);
  	if (init_done(zram)) {
  		pr_info("Cannot change disksize for initialized device\n");
-@@ -2085,9 +2141,15 @@ static ssize_t disksize_store(struct device *dev,
+@@ -2085,9 +2144,15 @@ static ssize_t disksize_store(struct device *dev,
  		zram->comps[prio] = comp;
  		zram->num_active_comps++;
  	}
@@ -6038,7 +6179,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  
  	return len;
  
-@@ -2096,6 +2158,7 @@ out_free_comps:
+@@ -2096,6 +2161,7 @@ out_free_comps:
  	zram_meta_free(zram, disksize);
  out_unlock:
  	up_write(&zram->init_lock);
@@ -6046,7 +6187,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  	return err;
  }
  
-@@ -2200,6 +2263,9 @@ static struct attribute *zram_disk_attrs[] = {
+@@ -2200,6 +2266,9 @@ static struct attribute *zram_disk_attrs[] = {
  	&dev_attr_bd_stat.attr,
  #endif
  	&dev_attr_debug_stat.attr,
@@ -6056,7 +6197,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  #ifdef CONFIG_ZRAM_MULTI_COMP
  	&dev_attr_recomp_algorithm.attr,
  	&dev_attr_recompress.attr,
-@@ -2228,6 +2294,8 @@ static int zram_add(void)
+@@ -2228,6 +2297,8 @@ static int zram_add(void)
  	device_id = ret;
  
  	init_rwsem(&zram->init_lock);
@@ -6066,7 +6207,7 @@ index 9f8bf0779d58b5538967a37e9f8ba3e26518421c..c5de829e3f58eccabf27ee2ca96c50b0
  	spin_lock_init(&zram->wb_limit_lock);
  #endif
 diff --git a/drivers/block/zram/zram_drv.h b/drivers/block/zram/zram_drv.h
-index 35e322144629224741c922618123ab5847023b79..da4e3fdb7769f5d4b8e210baced089f0dfe072fd 100644
+index 35e3221..da4e3fd 100644
 --- a/drivers/block/zram/zram_drv.h
 +++ b/drivers/block/zram/zram_drv.h
 @@ -16,10 +16,13 @@
